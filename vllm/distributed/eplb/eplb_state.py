@@ -263,6 +263,7 @@ class EplbState:
 
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
+        ep_size = ep_group.size()
 
         time_start = None
         is_main_rank = ep_rank == 0
@@ -308,18 +309,125 @@ class EplbState:
         num_nodes = (ep_group.size() + 7) // 8
         num_gpus = ep_group.size()
 
-        # Get new expert mappings
-        (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count,
-        ) = (rebalance_experts(
-            global_expert_load_window,
-            num_replicas,
-            num_groups,
-            num_nodes,
-            num_gpus,
-        ))
+        # OPTIMIZATION: Distribute layer computation across ranks
+        num_layers = model.num_moe_layers
+        layers_per_rank = (num_layers + ep_size - 1) // ep_size
+        layer_start = ep_rank * layers_per_rank
+        layer_end = min(layer_start + layers_per_rank, num_layers)
+
+        # Each rank computes mapping for its assigned layers
+        if layer_start < layer_end:
+            local_weight = global_expert_load_window[layer_start:layer_end]
+            (
+                local_physical_to_logical_map,
+                local_logical_to_physical_map,
+                local_logical_replica_count,
+            ) = rebalance_experts(
+                local_weight,
+                num_replicas,
+                num_groups,
+                num_nodes,
+                num_gpus,
+            )
+        else:
+            # Empty tensors for ranks with no layers assigned
+            local_physical_to_logical_map = torch.empty(
+                (0, num_replicas),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
+            local_logical_to_physical_map = torch.empty(
+                (0, model.num_logical_experts,
+                 model.num_redundant_experts + 1),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
+            local_logical_replica_count = torch.empty(
+                (0, model.num_logical_experts),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
+
+        # Prepare tensors for all_gather - each rank contributes
+        # its computed layers
+        max_layers_per_rank = (num_layers + ep_size - 1) // ep_size
+
+        # Pad local results to fixed size for all_gather
+        padded_phy2log = torch.full((max_layers_per_rank, num_replicas),
+                                    -1,
+                                    dtype=torch.int64,
+                                    device=global_expert_load_window.device)
+        padded_log2phy = torch.full(
+            (max_layers_per_rank, model.num_logical_experts,
+             model.num_redundant_experts + 1),
+            -1,
+            dtype=torch.int64,
+            device=global_expert_load_window.device)
+        padded_log_count = torch.full(
+            (max_layers_per_rank, model.num_logical_experts),
+            -1,
+            dtype=torch.int64,
+            device=global_expert_load_window.device)
+
+        # Fill in the actual computed results
+        actual_layers = layer_end - layer_start
+        if actual_layers > 0:
+            padded_phy2log[:actual_layers] = local_physical_to_logical_map
+            padded_log2phy[:actual_layers] = local_logical_to_physical_map
+            padded_log_count[:actual_layers] = local_logical_replica_count
+
+        # All-gather results from all ranks (much more efficient than
+        # multiple broadcasts)
+        gathered_phy2log_list = [
+            torch.empty_like(padded_phy2log) for _ in range(ep_size)
+        ]
+        gathered_log2phy_list = [
+            torch.empty_like(padded_log2phy) for _ in range(ep_size)
+        ]
+        gathered_log_count_list = [
+            torch.empty_like(padded_log_count) for _ in range(ep_size)
+        ]
+
+        all_gather(gathered_phy2log_list, padded_phy2log, group=ep_group)
+        all_gather(gathered_log2phy_list, padded_log2phy, group=ep_group)
+        all_gather(gathered_log_count_list, padded_log_count, group=ep_group)
+
+        # Reconstruct the final tensors by removing padding and concatenating
+        final_phy2log_parts = []
+        final_log2phy_parts = []
+        final_log_count_parts = []
+
+        for rank in range(ep_size):
+            rank_layer_start = rank * layers_per_rank
+            rank_layer_end = min(rank_layer_start + layers_per_rank,
+                                 num_layers)
+            rank_actual_layers = max(0, rank_layer_end - rank_layer_start)
+
+            if rank_actual_layers > 0:
+                final_phy2log_parts.append(
+                    gathered_phy2log_list[rank][:rank_actual_layers])
+                final_log2phy_parts.append(
+                    gathered_log2phy_list[rank][:rank_actual_layers])
+                final_log_count_parts.append(
+                    gathered_log_count_list[rank][:rank_actual_layers])
+
+        # Concatenate all parts to get the final results
+        new_physical_to_logical_map = torch.cat(
+            final_phy2log_parts,
+            dim=0) if final_phy2log_parts else torch.empty(
+                (0, num_replicas),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
+        new_logical_to_physical_map = torch.cat(
+            final_log2phy_parts,
+            dim=0) if final_log2phy_parts else torch.empty(
+                (0, model.num_logical_experts,
+                 model.num_redundant_experts + 1),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
+        new_logical_replica_count = torch.cat(
+            final_log_count_parts,
+            dim=0) if final_log_count_parts else torch.empty(
+                (0, model.num_logical_experts),
+                dtype=torch.int64,
+                device=global_expert_load_window.device)
 
         # Update expert weights
         rearrange_expert_weights_inplace(
