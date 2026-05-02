@@ -201,7 +201,7 @@ def build():
     parts.append(rect(mc_x_p, mc_y, mc_w, mc_h,
                       fill=COLORS["multi_fill"], rx=16, sw=2.5))
     parts.append(text(mc_x_p + mc_w / 2, mc_y + 28, "MultiConnector",
-                      size=15, weight="700"))
+                      size=17, weight="700"))
 
     # KV Block pill (Prefill)
     parts.append(rect(kvb_x_p, kvb_y, kvb_w, kvb_h,
@@ -230,8 +230,8 @@ def build():
 
     parts.append(rect(mc_x_d, mc_y, mc_w, mc_h,
                       fill=COLORS["multi_fill"], rx=16, sw=2.5))
-    parts.append(text(mc_x_d + mc_w / 2, mc_y + 30, "MultiConnector",
-                      size=19, weight="700"))
+    parts.append(text(mc_x_d + mc_w / 2, mc_y + 28, "MultiConnector",
+                      size=17, weight="700"))
 
     # KV Block pill (Decode)
     parts.append(rect(kvb_x_d, kvb_y, kvb_w, kvb_h,
