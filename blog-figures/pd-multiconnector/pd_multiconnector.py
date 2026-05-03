@@ -19,12 +19,18 @@ COLORS = {
     "muted": "#64748b",
     "label": "#0f172a",
     "instance_fill": "#f8fafc",
-    "header_fill": "#fcd34d",       # Prefill / Decode header (matches Master in fig 1)
+    # Each instance is colour-coded by the KV-block it produces. Prefill
+    # produces orange blocks, Decode produces blue blocks. The header and the
+    # KV-Block badge inside each instance share that producer colour, so the
+    # animation's orange / blue pills tie back visually to their origin.
+    "prefill_header_fill": "#fb923c",   # orange-400
+    "decode_header_fill":  "#60a5fa",   # blue-400
+    "prefill_kvb_fill":    "#fdba74",   # orange-300 (matches Round-1 prefill pill)
+    "decode_kvb_fill":     "#93c5fd",   # blue-300   (matches Round-1 decode pill)
     "multi_fill": "#e9d5ff",        # MultiConnector wrapper (purple-200)
     "pd_fill": "#bfdbfe",           # PD Connector (blue-200)
     "store_fill": "#bbf7d0",        # MooncakeStore Connector (green-200)
     "pool_fill": "#fed7aa",         # Mooncake KV pool (orange-200)
-    "kvblock_fill": "#fdba74",      # KV Block badge — same family as pool
     "pd_link": "#dc2626",
     "kvflow": "#7c3aed",            # KV-Block fan-out arrows: violet, distinct from PD red
 }
@@ -117,7 +123,17 @@ def left_bracket(right_x, top_y, bot_y, arm_len=14, corner_r=10, color=None, sw=
     )
 
 
-def build():
+def build(include_fanout: bool = True, include_kv_block: bool = True):
+    """Render the static figure SVG.
+
+    include_fanout:    when False, the four KV-Block fan-out arrows are
+                       omitted. Useful for the animated version, where moving
+                       particles depict the dispatch instead of static arrows.
+    include_kv_block:  when False, the two KV Block pills (one per instance)
+                       are hidden. The animated version uses moving KV pills
+                       to show the block traversal, so the static badges are
+                       redundant and would visually compete with them.
+    """
     parts = []
     parts.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
@@ -193,7 +209,7 @@ def build():
     parts.append(rect(p_x, p_y, inst_w, inst_h,
                       fill=COLORS["instance_fill"], rx=20, sw=2.5))
     parts.append(rect(p_x + (inst_w - header_w) / 2, header_y, header_w, header_h,
-                      fill=COLORS["header_fill"], rx=14))
+                      fill=COLORS["prefill_header_fill"], rx=14))
     parts.append(text(p_cx, header_y + header_h / 2 + 8, "Prefill Instance",
                       size=22, weight="700"))
 
@@ -203,11 +219,12 @@ def build():
     parts.append(text(mc_x_p + mc_w / 2, mc_y + 28, "MultiConnector",
                       size=17, weight="700"))
 
-    # KV Block pill (Prefill)
-    parts.append(rect(kvb_x_p, kvb_y, kvb_w, kvb_h,
-                      fill=COLORS["kvblock_fill"], rx=10, sw=2.2))
-    parts.append(text(kvb_cx_p, kvb_y + kvb_h / 2 + 7, "KV Block",
-                      size=19, weight="700"))
+    # KV Block pill (Prefill — produces ORANGE blocks)
+    if include_kv_block:
+        parts.append(rect(kvb_x_p, kvb_y, kvb_w, kvb_h,
+                          fill=COLORS["prefill_kvb_fill"], rx=10, sw=2.2))
+        parts.append(text(kvb_cx_p, kvb_y + kvb_h / 2 + 7, "KV Block",
+                          size=19, weight="700"))
 
     # Prefill: Store on the left, PD on the right
     parts.append(rect(p_store_x, conn_y, col_w, conn_h, fill=COLORS["store_fill"], rx=12))
@@ -224,7 +241,7 @@ def build():
     parts.append(rect(d_x, d_y, inst_w, inst_h,
                       fill=COLORS["instance_fill"], rx=20, sw=2.5))
     parts.append(rect(d_x + (inst_w - header_w) / 2, header_y, header_w, header_h,
-                      fill=COLORS["header_fill"], rx=14))
+                      fill=COLORS["decode_header_fill"], rx=14))
     parts.append(text(d_cx, header_y + header_h / 2 + 8, "Decode Instance",
                       size=22, weight="700"))
 
@@ -233,11 +250,12 @@ def build():
     parts.append(text(mc_x_d + mc_w / 2, mc_y + 28, "MultiConnector",
                       size=17, weight="700"))
 
-    # KV Block pill (Decode)
-    parts.append(rect(kvb_x_d, kvb_y, kvb_w, kvb_h,
-                      fill=COLORS["kvblock_fill"], rx=10, sw=2.2))
-    parts.append(text(kvb_cx_d, kvb_y + kvb_h / 2 + 7, "KV Block",
-                      size=19, weight="700"))
+    # KV Block pill (Decode — produces BLUE blocks)
+    if include_kv_block:
+        parts.append(rect(kvb_x_d, kvb_y, kvb_w, kvb_h,
+                          fill=COLORS["decode_kvb_fill"], rx=10, sw=2.2))
+        parts.append(text(kvb_cx_d, kvb_y + kvb_h / 2 + 7, "KV Block",
+                          size=19, weight="700"))
 
     # Decode: PD on the left, Store on the right
     parts.append(rect(d_pd_x, conn_y, col_w, conn_h, fill=COLORS["pd_fill"], rx=12))
@@ -257,24 +275,25 @@ def build():
     # (a hit pulls the block back into the worker via the same path).
     # 4 px margin is enough with refX=10 markers; the structural ~70 px gap
     # between KV Block bottom and connector top gives every arrow body length.
-    fan_top_y = kvb_y + kvb_h + 4
-    fan_bot_y = conn_y - 4
+    if include_fanout:
+        fan_top_y = kvb_y + kvb_h + 4
+        fan_bot_y = conn_y - 4
 
-    def fan_arrow(x1, y1, x2, y2):
-        return arrow(x1, y1, x2, y2,
-                     color=COLORS["kvflow"], sw=2.4,
-                     marker_end="arrow-kv", marker_start="arrow-kv-start")
+        def fan_arrow(x1, y1, x2, y2):
+            return arrow(x1, y1, x2, y2,
+                         color=COLORS["kvflow"], sw=2.4,
+                         marker_end="arrow-kv", marker_start="arrow-kv-start")
 
-    # Prefill: bottom-left of KV Block ↔ Store (LEFT), bottom-right ↔ PD (RIGHT)
-    parts.append(fan_arrow(kvb_x_p + kvb_w * 0.28, fan_top_y,
-                           p_store_cx, fan_bot_y))
-    parts.append(fan_arrow(kvb_x_p + kvb_w * 0.72, fan_top_y,
-                           p_pd_cx, fan_bot_y))
-    # Decode: bottom-left ↔ PD (LEFT), bottom-right ↔ Store (RIGHT)
-    parts.append(fan_arrow(kvb_x_d + kvb_w * 0.28, fan_top_y,
-                           d_pd_cx, fan_bot_y))
-    parts.append(fan_arrow(kvb_x_d + kvb_w * 0.72, fan_top_y,
-                           d_store_cx, fan_bot_y))
+        # Prefill: bottom-left of KV Block ↔ Store (LEFT), bottom-right ↔ PD (RIGHT)
+        parts.append(fan_arrow(kvb_x_p + kvb_w * 0.28, fan_top_y,
+                               p_store_cx, fan_bot_y))
+        parts.append(fan_arrow(kvb_x_p + kvb_w * 0.72, fan_top_y,
+                               p_pd_cx, fan_bot_y))
+        # Decode: bottom-left ↔ PD (LEFT), bottom-right ↔ Store (RIGHT)
+        parts.append(fan_arrow(kvb_x_d + kvb_w * 0.28, fan_top_y,
+                               d_pd_cx, fan_bot_y))
+        parts.append(fan_arrow(kvb_x_d + kvb_w * 0.72, fan_top_y,
+                               d_store_cx, fan_bot_y))
 
     # ===== PD ↔ PD link (red) =====
     pd_link_y = conn_y + conn_h / 2

@@ -32,7 +32,7 @@
 </defs>
 <rect x="0" y="0" width="1380" height="690" rx="0" fill="#ffffff" stroke="#ffffff" stroke-width="0"/>
 <rect x="180" y="50" width="440" height="460" rx="20" fill="#f8fafc" stroke="#1f2937" stroke-width="2.5"/>
-<rect x="290.0" y="72" width="220" height="60" rx="14" fill="#fcd34d" stroke="#1f2937" stroke-width="2"/>
+<rect x="290.0" y="72" width="220" height="60" rx="14" fill="#fb923c" stroke="#1f2937" stroke-width="2"/>
 <text x="400.0" y="110.0" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Prefill Instance</text>
 <rect x="205" y="224" width="390" height="250" rx="16" fill="#e9d5ff" stroke="#1f2937" stroke-width="2.5"/>
 <text x="400.0" y="252" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">MultiConnector</text>
@@ -44,11 +44,11 @@
 <rect x="408.0" y="299" width="167.0" height="140" rx="12" fill="#bfdbfe" stroke="#1f2937" stroke-width="2"/>
 <text x="491.5" y="378.0" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">PD Connector</text>
 <rect x="800" y="50" width="440" height="460" rx="20" fill="#f8fafc" stroke="#1f2937" stroke-width="2.5"/>
-<rect x="910.0" y="72" width="220" height="60" rx="14" fill="#fcd34d" stroke="#1f2937" stroke-width="2"/>
+<rect x="910.0" y="72" width="220" height="60" rx="14" fill="#60a5fa" stroke="#1f2937" stroke-width="2"/>
 <text x="1020.0" y="110.0" text-anchor="middle" font-size="22" font-weight="700" fill="#0f172a">Decode Instance</text>
 <rect x="825" y="224" width="390" height="250" rx="16" fill="#e9d5ff" stroke="#1f2937" stroke-width="2.5"/>
 <text x="1020.0" y="252" text-anchor="middle" font-size="17" font-weight="700" fill="#0f172a">MultiConnector</text>
-<rect x="910.0" y="144" width="220" height="50" rx="10" fill="#fdba74" stroke="#1f2937" stroke-width="2.2"/>
+<rect x="910.0" y="144" width="220" height="50" rx="10" fill="#93c5fd" stroke="#1f2937" stroke-width="2.2"/>
 <text x="1020.0" y="176.0" text-anchor="middle" font-size="19" font-weight="700" fill="#0f172a">KV Block</text>
 <rect x="845" y="299" width="167.0" height="140" rx="12" fill="#bfdbfe" stroke="#1f2937" stroke-width="2"/>
 <text x="928.5" y="378.0" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">PD Connector</text>
