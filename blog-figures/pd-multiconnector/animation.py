@@ -52,9 +52,12 @@ from pd_multiconnector import build, W as STATIC_W  # noqa: E402
 
 
 # ---- Animation parameters ----
+# 12 s total: each of the three narrated phases gets ~3 s of action with
+# explicit ~1 s lulls between them so a viewer can read the caption, watch
+# the action settle, and only then see the next caption + action begin.
 FPS = 30
-DURATION_S = 9
-N_FRAMES = FPS * DURATION_S            # 270 — long enough for two rounds
+DURATION_S = 12
+N_FRAMES = FPS * DURATION_S            # 360
 GIF_WIDTH_PX = 900
 GIF_FPS = 20
 
@@ -156,38 +159,45 @@ def pulse(t, t0, t1):
 
 
 # ---- Numbered step caption ----
-# A short narration banner at the top of the canvas. Text changes per phase
-# with a brief opacity cross-fade across phase boundaries.
+# A narration banner at the top of the canvas. Each phase has its own
+# [t0, t1] window during which the caption is visible; the fade-in / fade-out
+# happens INSIDE that window. Between phases there is a deliberate blank
+# stretch so step N fully fades out BEFORE step N+1 fades in — no two
+# captions are ever on screen at the same time.
 STEPS = [
-    (0.00, 0.46,
+    (0.00, 0.34,
      "Step 1 / 3   ·   Prefill request: MultiConnector dispatches new KV via PD link to Decode AND to Pool"),
-    (0.46, 0.70,
+    (0.42, 0.62,
      "Step 2 / 3   ·   Decode generates new KV during decoding, puts it to Pool"),
     (0.70, 1.00,
      "Step 3 / 3   ·   Next Prefill request: cache hit retrieves BOTH prefill-produced and decode-produced KV from Pool"),
 ]
-STEP_FADE = 0.04   # cross-fade window at phase boundaries
+STEP_FADE = 0.04   # fade-in / fade-out window inside each step
 
 
 def step_caption_svg(t):
-    """One <text> element per step, with opacity that pulses 1 inside the
-    step's window and fades out across STEP_FADE at the boundaries."""
+    """One <text> element per step. Visibility is hard-clipped to [t0, t1];
+    inside that window opacity ramps up over STEP_FADE at the start and
+    ramps down over STEP_FADE at the end. Between adjacent steps' [t0, t1]
+    windows the caption is fully invisible — the next step's fade-in only
+    begins once the previous step's window is closed."""
     out = []
     for t0, t1, txt in STEPS:
-        if t < t0 - STEP_FADE or t > t1 + STEP_FADE:
+        if t < t0 or t > t1:
             continue
-        if t < t0:
-            opacity = (t - (t0 - STEP_FADE)) / STEP_FADE
-        elif t > t1:
-            opacity = ((t1 + STEP_FADE) - t) / STEP_FADE
+        if t < t0 + STEP_FADE:
+            opacity = (t - t0) / STEP_FADE
+        elif t > t1 - STEP_FADE:
+            opacity = (t1 - t) / STEP_FADE
         else:
             opacity = 1.0
         opacity = max(0.0, min(1.0, opacity))
         if opacity <= 0.01:
             continue
         out.append(
-            f'<text x="{STATIC_W / 2}" y="28" text-anchor="middle" '
-            f'font-size="15" font-weight="700" fill="#1f2937" '
+            f'<text x="{STATIC_W / 2}" y="32" text-anchor="middle" '
+            f'font-size="19" font-weight="700" fill="#1f2937" '
+            f'font-family="Helvetica, Arial, sans-serif" '
             f'letter-spacing="0.3" opacity="{opacity:.3f}">'
             f'{txt}</text>'
         )
@@ -199,36 +209,30 @@ def step_caption_svg(t):
 # `fill` (orange = prefill-produced, blue = decode-produced), and optional
 # fade_in / fade_out.
 #
-# The full timeline is two rounds:
+# The full timeline is three narrated phases with deliberate lulls in between
+# so the viewer has time to read the caption AND watch each phase settle
+# before the next one begins.
 #
-#   ROUND 1
-#     0.00–0.16  Prefill KV → MC fork point (single orange pill emits + descends)
-#     0.16–0.30  Split + dispatch — two orange pills travel into PD and Store
-#     0.30–0.42  Round-1 outputs — orange Store pill drops to Pool;
-#                                    orange PD pill crosses link to Decode KV
-#     0.42–0.52  Decode generates new tokens — Decode KV pulses BLUE; a new
-#                                              blue pill emerges
-#     0.52–0.66  Decode put — blue pill traverses Decode Store down to Pool
+#   PHASE 1   Round-1 Prefill request: dispatch (0.00 → 0.34)
+#   GAP       0.34 → 0.42  — everything rests
+#   PHASE 2   Decode generates + puts (0.42 → 0.62)
+#   GAP       0.62 → 0.70  — everything rests
+#   PHASE 3   Round-2 Prefill request: cache-hit GET (0.70 → 0.94)
+#   SETTLE    0.94 → 1.00  — fade for a seamless loop
 #
-#   ROUND 2 (next prefill request)
-#     0.66–0.92  Prefill GET — both an orange (Round-1 prefill block) and a
-#                              blue (Round-1 decode block) pill rise from
-#                              Pool through Prefill Store back into Prefill
-#                              KV Block. Slight x and t offset so they read
-#                              as two distinct blocks travelling in tandem.
-#     0.92–1.00  Settle / fade out for seamless loop.
+# At 12 s wall-clock that gives ~4 s + 1 s + 2.4 s + 1 s + 2.6 s + 0.7 s.
 
-# ROUND 1 ----------------------------------------------------------------------
+# PHASE 1 ----------------------------------------------------------------------
 
 # Single orange pill emerging from the Prefill instance (header bottom)
 # and descending into the MultiConnector fork point.
 R1_SINGLE = {
-    "alive": (0.00, 0.20),
+    "alive": (0.00, 0.15),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
         (0.00, (P_CX, HEADER_BOT)),
-        (0.14, (MC_CX_P, FORK_Y)),
-        (0.20, (MC_CX_P, FORK_Y)),
+        (0.10, (MC_CX_P, FORK_Y)),
+        (0.15, (MC_CX_P, FORK_Y)),
     ],
     "fade_in": 0.04,
     "fade_out": 0.05,
@@ -236,15 +240,15 @@ R1_SINGLE = {
 
 # Orange Store pill: fork → Prefill Store → Pool (Round-1 put).
 R1_STORE = {
-    "alive": (0.16, 0.42),
+    "alive": (0.12, 0.31),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
-        (0.16, (MC_CX_P, FORK_Y)),
-        (0.22, (P_STORE_CX, FORK_Y)),
-        (0.27, (P_STORE_CX, CONN_Y)),
-        (0.34, (P_STORE_CX, CONN_BOT)),
-        (0.40, (P_STORE_CX - 14, POOL_Y)),       # lands slightly LEFT of store-cx
-        (0.42, (P_STORE_CX - 14, POOL_Y)),
+        (0.12, (MC_CX_P, FORK_Y)),
+        (0.16, (P_STORE_CX, FORK_Y)),
+        (0.20, (P_STORE_CX, CONN_Y)),
+        (0.25, (P_STORE_CX, CONN_BOT)),
+        (0.29, (P_STORE_CX - 14, POOL_Y)),       # lands slightly LEFT of store-cx
+        (0.31, (P_STORE_CX - 14, POOL_Y)),
     ],
     "fade_in": 0.04,
     "fade_out": 0.05,
@@ -252,75 +256,77 @@ R1_STORE = {
 
 # Orange PD pill: fork → Prefill PD → cross link → Decode PD → Decode instance.
 R1_PD = {
-    "alive": (0.16, 0.46),
+    "alive": (0.12, 0.34),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
-        (0.16, (MC_CX_P, FORK_Y)),
-        (0.22, (P_PD_CX, FORK_Y)),
-        (0.27, (P_PD_CX, CONN_Y)),
-        (0.31, (P_PD_RIGHT, PD_LINK_Y)),
-        (0.36, (D_PD_X, PD_LINK_Y)),
-        (0.40, (D_PD_CX, CONN_Y)),
-        (0.43, (D_PD_CX, FORK_Y)),
-        (0.46, (D_CX, HEADER_BOT)),         # arrives at Decode instance (header bottom)
+        (0.12, (MC_CX_P, FORK_Y)),
+        (0.16, (P_PD_CX, FORK_Y)),
+        (0.20, (P_PD_CX, CONN_Y)),
+        (0.23, (P_PD_RIGHT, PD_LINK_Y)),
+        (0.27, (D_PD_X, PD_LINK_Y)),
+        (0.30, (D_PD_CX, CONN_Y)),
+        (0.32, (D_PD_CX, FORK_Y)),
+        (0.34, (D_CX, HEADER_BOT)),              # arrives at Decode instance
     ],
     "fade_in": 0.04,
-    "fade_out": 0.06,
+    "fade_out": 0.05,
 }
+
+# PHASE 2 — Decode generates blue + puts to pool ------------------------------
 
 # Blue pill (decode-produced): emerges from Decode instance (header bottom)
 # → descends into Decode MultiConnector → through Decode Store → lands at
 # decode-side of Pool. The decode-side put arrow exits Decode Store and
 # attaches to the pool at D_STORE_CX, so the path follows that arrow exactly.
 R1_DECODE_PUT = {
-    "alive": (0.46, 0.70),
+    "alive": (0.42, 0.62),
     "fill": KVB_FILL_BLUE,
     "keyframes": [
-        (0.46, (D_CX, HEADER_BOT)),
-        (0.52, (D_STORE_CX, FORK_Y)),
-        (0.56, (D_STORE_CX, CONN_Y)),
-        (0.62, (D_STORE_CX, CONN_BOT)),
-        (0.68, (D_STORE_CX, POOL_Y)),            # lands at decode-side of pool
-        (0.70, (D_STORE_CX, POOL_Y)),
+        (0.42, (D_CX, HEADER_BOT)),
+        (0.47, (D_STORE_CX, FORK_Y)),
+        (0.50, (D_STORE_CX, CONN_Y)),
+        (0.55, (D_STORE_CX, CONN_BOT)),
+        (0.60, (D_STORE_CX, POOL_Y)),            # lands at decode-side of pool
+        (0.62, (D_STORE_CX, POOL_Y)),
     ],
     "fade_in": 0.04,
     "fade_out": 0.05,
 }
 
-# ROUND 2 — next prefill GETs both blocks --------------------------------------
+# PHASE 3 — Round-2 Prefill GETs both blocks ----------------------------------
 
 # Orange + Blue GET: rise together from the Prefill side of Pool, through
-# Prefill Store, into Prefill KV Block. Both share IDENTICAL timing keyframes
+# Prefill Store, into Prefill instance. Both share IDENTICAL timing keyframes
 # and a constant horizontal offset (orange LEFT, blue RIGHT) so they move in
 # perfect tandem. The pill is 44 px wide, so centres are 52 px apart (offset
 # ±26) — that leaves an 8 px gap between them, no overlap.
 GET_GAP = 26
 R2_GET_ORANGE = {
-    "alive": (0.72, 0.96),
+    "alive": (0.72, 0.94),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
         (0.72, (P_STORE_CX - GET_GAP, POOL_Y)),
         (0.78, (P_STORE_CX - GET_GAP, CONN_BOT)),
-        (0.84, (P_STORE_CX - GET_GAP, CONN_Y)),
-        (0.90, (P_STORE_CX - GET_GAP, FORK_Y)),
-        (0.96, (P_CX - GET_GAP, HEADER_BOT)),    # arrives at Prefill instance
+        (0.83, (P_STORE_CX - GET_GAP, CONN_Y)),
+        (0.88, (P_STORE_CX - GET_GAP, FORK_Y)),
+        (0.94, (P_CX - GET_GAP, HEADER_BOT)),    # arrives at Prefill instance
     ],
     "fade_in": 0.04,
-    "fade_out": 0.06,
+    "fade_out": 0.05,
 }
 
 R2_GET_BLUE = {
-    "alive": (0.72, 0.96),                       # IDENTICAL alive window
+    "alive": (0.72, 0.94),                       # IDENTICAL alive window
     "fill": KVB_FILL_BLUE,
     "keyframes": [
         (0.72, (P_STORE_CX + GET_GAP, POOL_Y)),
         (0.78, (P_STORE_CX + GET_GAP, CONN_BOT)),
-        (0.84, (P_STORE_CX + GET_GAP, CONN_Y)),
-        (0.90, (P_STORE_CX + GET_GAP, FORK_Y)),
-        (0.96, (P_CX + GET_GAP, HEADER_BOT)),    # arrives at Prefill instance
+        (0.83, (P_STORE_CX + GET_GAP, CONN_Y)),
+        (0.88, (P_STORE_CX + GET_GAP, FORK_Y)),
+        (0.94, (P_CX + GET_GAP, HEADER_BOT)),    # arrives at Prefill instance
     ],
     "fade_in": 0.04,
-    "fade_out": 0.06,
+    "fade_out": 0.05,
 }
 
 PARTICLES = [
@@ -333,24 +339,28 @@ PARTICLES = [
 # Triangular pulse 0→1→0 over [t0, t1] highlights an element while it is
 # "active" — receiving a pill, transmitting through the link, etc.
 GLOW_EVENTS = [
-    # ROUND 1
-    ("p_kv",     0.00, 0.14),    # Prefill KV emits
-    ("p_store",  0.27, 0.40),    # Prefill Store active during put
-    ("p_pd",     0.27, 0.34),    # Prefill PD active during put
-    ("pd_link",  0.30, 0.38),    # PD link flashes during cross
-    ("d_pd",     0.35, 0.44),    # Decode PD receives
-    ("d_kv",     0.42, 0.50),    # Decode KV receives orange + immediately
-                                 # pulses again (in blue) for new generation
-    ("pool",     0.38, 0.46),    # Pool receives orange (Round-1 prefill put)
+    # PHASE 1 — Round-1 Prefill dispatches (0.00 → 0.34)
+    ("p_kv",     0.00, 0.10),    # Prefill instance emits
+    ("p_store",  0.20, 0.30),    # Prefill Store active during put
+    ("p_pd",     0.20, 0.25),    # Prefill PD active during put
+    ("pd_link",  0.22, 0.28),    # PD link flashes during cross
+    ("d_pd",     0.26, 0.32),    # Decode PD receives
+    ("pool",     0.28, 0.32),    # Pool receives orange (Round-1 prefill put)
+    ("d_kv",     0.30, 0.34),    # Decode instance flashes ORANGE on receive
 
-    # DECODE generates + puts new block
-    ("d_store",  0.54, 0.66),    # Decode Store active during decode put
-    ("pool",     0.64, 0.72),    # Pool receives blue (Round-1 decode put)
+    # GAP 0.34 → 0.42
 
-    # ROUND 2 — next prefill GETs both
-    ("pool",     0.70, 0.78),    # Pool active during get
-    ("p_store",  0.76, 0.90),    # Prefill Store active during get
-    ("p_kv",     0.92, 1.00),    # Prefill KV receives both blocks
+    # PHASE 2 — Decode generates blue + puts (0.42 → 0.62)
+    ("d_kv",     0.42, 0.46),    # Decode instance pulses BLUE for new generation
+    ("d_store",  0.50, 0.58),    # Decode Store active during put
+    ("pool",     0.58, 0.62),    # Pool receives blue (decode put)
+
+    # GAP 0.62 → 0.70
+
+    # PHASE 3 — Round-2 Prefill GETs both (0.70 → 0.94)
+    ("pool",     0.70, 0.76),    # Pool active during get
+    ("p_store",  0.76, 0.88),    # Prefill Store active during get
+    ("p_kv",     0.90, 0.96),    # Prefill instance receives both blocks
 ]
 
 # ---- Helpers ----

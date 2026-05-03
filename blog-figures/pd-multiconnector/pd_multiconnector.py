@@ -138,7 +138,7 @@ def build(include_fanout: bool = True, include_kv_block: bool = True):
     parts.append(
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
         f'viewBox="0 0 {W} {H}" '
-        f'font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif">'
+        f'font-family="Helvetica, Arial, sans-serif">'
     )
     parts.append(ARROW_DEFS)
     parts.append(rect(0, 0, W, H, fill="#ffffff", stroke="#ffffff", rx=0, sw=0))
