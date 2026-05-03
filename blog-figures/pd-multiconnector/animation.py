@@ -239,16 +239,18 @@ R1_SINGLE = {
 }
 
 # Orange Store pill: fork → Prefill Store → Pool (Round-1 put).
+# alive[1] is set to (last keyframe time) + fade_out so the fade-out window
+# begins ONLY after the pill has reached its destination — the pill is at
+# full opacity throughout the motion, then dissolves at the destination.
 R1_STORE = {
-    "alive": (0.12, 0.31),
+    "alive": (0.12, 0.34),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
         (0.12, (MC_CX_P, FORK_Y)),
         (0.16, (P_STORE_CX, FORK_Y)),
         (0.20, (P_STORE_CX, CONN_Y)),
         (0.25, (P_STORE_CX, CONN_BOT)),
-        (0.29, (P_STORE_CX - 14, POOL_Y)),       # lands slightly LEFT of store-cx
-        (0.31, (P_STORE_CX - 14, POOL_Y)),
+        (0.29, (P_STORE_CX - 14, POOL_Y)),       # arrives at pool (slightly LEFT of store-cx)
     ],
     "fade_in": 0.04,
     "fade_out": 0.05,
@@ -256,7 +258,7 @@ R1_STORE = {
 
 # Orange PD pill: fork → Prefill PD → cross link → Decode PD → Decode instance.
 R1_PD = {
-    "alive": (0.12, 0.34),
+    "alive": (0.12, 0.39),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
         (0.12, (MC_CX_P, FORK_Y)),
@@ -279,15 +281,14 @@ R1_PD = {
 # decode-side of Pool. The decode-side put arrow exits Decode Store and
 # attaches to the pool at D_STORE_CX, so the path follows that arrow exactly.
 R1_DECODE_PUT = {
-    "alive": (0.42, 0.62),
+    "alive": (0.42, 0.65),
     "fill": KVB_FILL_BLUE,
     "keyframes": [
         (0.42, (D_CX, HEADER_BOT)),
         (0.47, (D_STORE_CX, FORK_Y)),
         (0.50, (D_STORE_CX, CONN_Y)),
         (0.55, (D_STORE_CX, CONN_BOT)),
-        (0.60, (D_STORE_CX, POOL_Y)),            # lands at decode-side of pool
-        (0.62, (D_STORE_CX, POOL_Y)),
+        (0.60, (D_STORE_CX, POOL_Y)),            # arrives at decode-side of pool
     ],
     "fade_in": 0.04,
     "fade_out": 0.05,
@@ -302,7 +303,7 @@ R1_DECODE_PUT = {
 # ±26) — that leaves an 8 px gap between them, no overlap.
 GET_GAP = 26
 R2_GET_ORANGE = {
-    "alive": (0.72, 0.94),
+    "alive": (0.72, 0.99),
     "fill": KVB_FILL_ORANGE,
     "keyframes": [
         (0.72, (P_STORE_CX - GET_GAP, POOL_Y)),
@@ -316,7 +317,7 @@ R2_GET_ORANGE = {
 }
 
 R2_GET_BLUE = {
-    "alive": (0.72, 0.94),                       # IDENTICAL alive window
+    "alive": (0.72, 0.99),                       # IDENTICAL alive window
     "fill": KVB_FILL_BLUE,
     "keyframes": [
         (0.72, (P_STORE_CX + GET_GAP, POOL_Y)),
@@ -346,21 +347,24 @@ GLOW_EVENTS = [
     ("pd_link",  0.22, 0.28),    # PD link flashes during cross
     ("d_pd",     0.26, 0.32),    # Decode PD receives
     ("pool",     0.28, 0.32),    # Pool receives orange (Round-1 prefill put)
-    ("d_kv",     0.30, 0.34),    # Decode instance flashes ORANGE on receive
+    # The receive-side glows peak AFTER the pill arrives (not before): the
+    # orange pill lands at the Decode header at t=0.34, so the d_kv glow
+    # window starts at arrival and decays alongside the pill's fade-out.
+    ("d_kv",     0.34, 0.39),    # Decode instance flashes ORANGE on receive
 
     # GAP 0.34 → 0.42
 
     # PHASE 2 — Decode generates blue + puts (0.42 → 0.62)
     ("d_kv",     0.42, 0.46),    # Decode instance pulses BLUE for new generation
     ("d_store",  0.50, 0.58),    # Decode Store active during put
-    ("pool",     0.58, 0.62),    # Pool receives blue (decode put)
+    ("pool",     0.60, 0.65),    # Pool receives blue (decode put), peaks at arrival
 
     # GAP 0.62 → 0.70
 
     # PHASE 3 — Round-2 Prefill GETs both (0.70 → 0.94)
     ("pool",     0.70, 0.76),    # Pool active during get
     ("p_store",  0.76, 0.88),    # Prefill Store active during get
-    ("p_kv",     0.90, 0.96),    # Prefill instance receives both blocks
+    ("p_kv",     0.94, 0.99),    # Prefill instance receives both blocks (peaks at arrival)
 ]
 
 # ---- Helpers ----
