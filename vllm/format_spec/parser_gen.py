@@ -53,6 +53,11 @@ def _reasoning_transitions(
         transitions[(ParserState.REASONING, "THINK_START")] = Transition(
             ParserState.REASONING, ()
         )
+        # A start marker mid-content re-enters reasoning (GLM/DSML style).
+        transitions[(ParserState.CONTENT, "THINK_START")] = Transition(
+            ParserState.REASONING,
+            (EventType.REASONING_START,),
+        )
     return transitions
 
 
@@ -195,9 +200,195 @@ def _qwen_xml_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
     return terminals, transitions, options
 
 
+def _arg_key_value_xml_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
+    """FSM for GLM-style calls: ``<tool_call>NAME<arg_key>K</arg_key>...``.
+
+    The name has no suffix terminal — it ends at the first ``<arg_key>``
+    or at ``call_end`` (zero-argument calls). Mirrors the hand-written
+    ``glm47_moe_config`` topology.
+    """
+    from vllm.parser.glm47_moe import _glm47_arg_converter
+
+    tool = spec.tool_calls
+    assert tool is not None
+    terminals = {
+        "TOOL_START": tool.trigger,
+        "TOOL_END": _CLOSING_TAG_RE.findall(tool.call_end)[-1],
+        "ARG_KEY_START": "<arg_key>",
+        "ARG_KEY_END": "</arg_key>",
+        "ARG_VALUE_START": "<arg_value>",
+        "ARG_VALUE_END": "</arg_value>",
+    }
+    transitions = {
+        (ParserState.REASONING, "TOOL_START"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.REASONING_END, EventType.TOOL_CALL_START),
+        ),
+        (ParserState.CONTENT, "TOOL_START"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.TOOL_CALL_START,),
+        ),
+        (ParserState.TOOL_NAME, "ARG_KEY_START"): Transition(
+            ParserState.TOOL_ARGS,
+            (EventType.ARG_VALUE_CHUNK,),
+        ),
+        (ParserState.TOOL_NAME, "TOOL_END"): Transition(
+            ParserState.CONTENT,
+            (EventType.TOOL_CALL_END,),
+        ),
+        (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+            ParserState.CONTENT,
+            (EventType.TOOL_CALL_END,),
+        ),
+    }
+    transitions.update(
+        {
+            (ParserState.TOOL_ARGS, terminal): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
+            )
+            for terminal in (
+                "ARG_KEY_START",
+                "ARG_KEY_END",
+                "ARG_VALUE_START",
+                "ARG_VALUE_END",
+            )
+        }
+    )
+    options = {
+        "arg_converter": _glm47_arg_converter,
+        "tool_args_json": False,
+        "validate_tool_names": True,
+    }
+    return terminals, transitions, options
+
+
+_MINIMAX_NS = "]<]minimax[>["
+
+
+def _minimax_ns_args_converter(raw_args: str, partial: bool) -> str:
+    """Parse ``{NS}<K>V{NS}</K>`` element blocks (nested) into JSON.
+
+    Values stay raw strings at the leaves; sibling ``<item>`` elements
+    collapse into a list. Unterminated elements contribute their partial
+    text when ``partial`` is set.
+    """
+    root: dict = {}
+    stack: list[tuple[str, dict, list[str]]] = [("", root, [])]
+    for chunk in raw_args.split(_MINIMAX_NS)[1:]:
+        closing = chunk.startswith("</")
+        gt = chunk.find(">")
+        if gt < 0:
+            continue
+        tag = chunk[2:gt] if closing else chunk[1:gt]
+        text = chunk[gt + 1 :]
+        if closing:
+            if len(stack) > 1 and stack[-1][0] == tag:
+                name, children, texts = stack.pop()
+                value = children if children else "".join(texts)
+                _ns_insert(stack[-1][1], name, value)
+        else:
+            stack.append((tag, {}, [text]))
+    if partial:
+        while len(stack) > 1:
+            name, children, texts = stack.pop()
+            value = children if children else "".join(texts)
+            _ns_insert(stack[-1][1], name, value)
+    return json.dumps(_ns_finalize(root), ensure_ascii=False)
+
+
+def _ns_insert(container: dict, name: str, value) -> None:
+    if name in container:
+        existing = container[name]
+        if isinstance(existing, list):
+            existing.append(value)
+        else:
+            container[name] = [existing, value]
+    else:
+        container[name] = value
+
+
+def _ns_finalize(node):
+    if isinstance(node, dict):
+        if set(node) == {"item"}:
+            items = node["item"] if isinstance(node["item"], list) else [node["item"]]
+            return [_ns_finalize(item) for item in items]
+        return {key: _ns_finalize(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_ns_finalize(item) for item in node]
+    return node
+
+
+def _sectioned_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
+    """FSM for section-wrapped calls (DSML, MiniMax-M3 namespace XML).
+
+    ``{section_begin} {name_prefix}NAME{name_suffix}ARGS{call_end} ...
+    {section_end}`` — mirrors the hand-written ``deepseek_v4_config``
+    topology.
+    """
+    tool = spec.tool_calls
+    assert tool is not None
+    if not tool.section_begin:
+        raise ValueError(f"{spec.name}: sectioned encoding requires section markers")
+    terminals = {
+        "TOOL_START": tool.trigger,
+        "TOOL_END": tool.section_end.strip(),
+        "INVOKE_PREFIX": tool.name_prefix,
+        "INVOKE_NAME_END": tool.name_suffix.rstrip("\n"),
+        "INVOKE_END": tool.call_end.strip(),
+    }
+    transitions = {
+        (ParserState.REASONING, "TOOL_START"): Transition(
+            ParserState.TOOL_PREAMBLE,
+            (EventType.REASONING_END,),
+        ),
+        (ParserState.CONTENT, "TOOL_START"): Transition(ParserState.TOOL_PREAMBLE, ()),
+        (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.TOOL_CALL_START,),
+        ),
+        (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(ParserState.CONTENT, ()),
+        (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
+            ParserState.TOOL_ARGS, ()
+        ),
+        (ParserState.TOOL_ARGS, "INVOKE_END"): Transition(
+            ParserState.TOOL_BETWEEN,
+            (EventType.TOOL_CALL_END,),
+        ),
+        (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+            ParserState.CONTENT,
+            (EventType.TOOL_CALL_END,),
+        ),
+        (ParserState.TOOL_BETWEEN, "INVOKE_PREFIX"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.TOOL_CALL_START,),
+        ),
+        (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(ParserState.CONTENT, ()),
+    }
+    if tool.args_encoding == "dsml":
+        terminals["PARAM_CLOSE"] = "</｜DSML｜parameter>"
+        from vllm.parser.deepseek_v4 import _dsml_arg_converter
+
+        options = {
+            "arg_converter": _dsml_arg_converter,
+            "arg_structural_chars": frozenset(">"),
+            "strip_content_whitespace_with_tools": False,
+            "tool_args_json": False,
+        }
+    else:
+        options = {
+            "arg_converter": _minimax_ns_args_converter,
+            "tool_args_json": False,
+        }
+    return terminals, transitions, options
+
+
 _TOOL_CONFIG_BUILDERS = {
     "json": _json_tool_config,
     "qwen_xml": _qwen_xml_tool_config,
+    "arg_key_value_xml": _arg_key_value_xml_tool_config,
+    "dsml": _sectioned_tool_config,
+    "minimax_ns_xml": _sectioned_tool_config,
 }
 
 
@@ -222,9 +413,7 @@ def to_parser_engine_config(
         terminals.update(tool_terminals)
         transitions.update(tool_transitions)
 
-    if spec.reasoning is not None and (
-        spec.reasoning.forced or spec.reasoning.start_in_prompt
-    ):
+    if spec.reasoning is not None and spec.reasoning.forced:
         thinking = True
     start_in_reasoning = thinking and spec.reasoning is not None
 

@@ -96,9 +96,7 @@ def wrap_with_reasoning(
     masked until the final content completes, and the reasoning boundary
     is tracked by the grammar matcher itself — no scheduler-side gating.
     """
-    if spec.reasoning is not None and (
-        spec.reasoning.forced or spec.reasoning.start_in_prompt
-    ):
+    if spec.reasoning is not None and spec.reasoning.forced:
         thinking = True
     element = reasoning_element(spec) if thinking else None
     if element is None:

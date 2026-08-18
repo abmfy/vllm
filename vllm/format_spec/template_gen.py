@@ -17,24 +17,65 @@ from typing import Any
 
 from vllm.format_spec.spec import ModelFormatSpec
 
-_QWEN_XML_UNRENDERABLE = ("</parameter>", "<parameter=", "</function>")
+_MINIMAX_NS = "]<]minimax[>["
+
+_UNRENDERABLE = {
+    "qwen_xml": ("</parameter>", "<parameter=", "</function>"),
+    "arg_key_value_xml": ("</arg_value>", "<arg_key>"),
+    "dsml": ("</｜DSML｜parameter>",),
+    "minimax_ns_xml": (_MINIMAX_NS,),
+}
 
 
-def _qwen_xml_value(value: Any) -> str:
-    rendered = value if isinstance(value, str) else json.dumps(value)
-    for marker in _QWEN_XML_UNRENDERABLE:
+def _scalar(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _guarded_scalar(encoding: str, value: Any) -> str:
+    rendered = _scalar(value)
+    for marker in _UNRENDERABLE.get(encoding, ()):
         if marker in rendered:
             raise ValueError(f"argument value contains unrenderable {marker!r}")
     return rendered
 
 
+def _render_ns_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return "".join(
+            f"{_MINIMAX_NS}<{key}>{_render_ns_value(item)}{_MINIMAX_NS}</{key}>"
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return "".join(
+            f"{_MINIMAX_NS}<item>{_render_ns_value(item)}{_MINIMAX_NS}</item>"
+            for item in value
+        )
+    return _guarded_scalar("minimax_ns_xml", value)
+
+
 def _render_args(spec: ModelFormatSpec, arguments: dict[str, Any]) -> str:
     assert spec.tool_calls is not None
-    if spec.tool_calls.args_encoding == "qwen_xml":
+    encoding = spec.tool_calls.args_encoding
+    if encoding == "qwen_xml":
         return "".join(
-            f"<parameter={key}>\n{_qwen_xml_value(value)}\n</parameter>"
+            f"<parameter={key}>\n{_guarded_scalar(encoding, value)}\n</parameter>"
             for key, value in arguments.items()
         )
+    if encoding == "arg_key_value_xml":
+        return "".join(
+            f"<arg_key>{key}</arg_key>\n"
+            f"<arg_value>{_guarded_scalar(encoding, value)}</arg_value>\n"
+            for key, value in arguments.items()
+        )
+    if encoding == "dsml":
+        return "\n".join(
+            f'<｜DSML｜parameter name="{key}" '
+            f'string="{"true" if isinstance(value, str) else "false"}">'
+            f"{_guarded_scalar(encoding, value)}</｜DSML｜parameter>"
+            for key, value in arguments.items()
+        )
+    if encoding == "minimax_ns_xml":
+        return _render_ns_value(arguments)
     return json.dumps(arguments, ensure_ascii=False)
 
 
@@ -68,18 +109,70 @@ def render_assistant_turn(
         parts.append(spec.reasoning.end)
     parts.append(content)
     if tool_calls:
-        assert spec.tool_calls is not None
-        rendered = [
+        tool = spec.tool_calls
+        assert tool is not None
+        rendered = tool.separator.join(
             render_tool_call(spec, name, arguments) for name, arguments in tool_calls
-        ]
+        )
         if content:
-            parts.append(spec.tool_calls.separator)
-        parts.append(spec.tool_calls.separator.join(rendered))
+            parts.append(tool.separator)
+        parts.append(tool.section_begin + rendered + tool.section_end)
     return "".join(parts)
 
 
 def _jinja_str(value: str) -> str:
     return "{{ " + json.dumps(value, ensure_ascii=False) + " }}"
+
+
+_JINJA_SCALAR = "{{ value if value is string else value | tojson }}"
+
+
+def _jinja_args_fragment(spec: ModelFormatSpec) -> str:
+    """Per-call arguments loop; flat (scalar-valued) arguments only."""
+    tool = spec.tool_calls
+    assert tool is not None
+    loop = "{%- for key, value in tool_call.function.arguments.items() %}"
+    end = "{%- endfor %}"
+    if tool.args_encoding == "qwen_xml":
+        return (
+            loop
+            + "{{ '<parameter=' + key + '>\\n' }}"
+            + _JINJA_SCALAR
+            + "{{ '\\n</parameter>' }}"
+            + end
+        )
+    if tool.args_encoding == "arg_key_value_xml":
+        return (
+            loop
+            + "{{ '<arg_key>' + key + '</arg_key>\\n<arg_value>' }}"
+            + _JINJA_SCALAR
+            + "{{ '</arg_value>\\n' }}"
+            + end
+        )
+    if tool.args_encoding == "dsml":
+        return (
+            loop
+            + "{%- if not loop.first %}{{ '\\n' }}{%- endif %}"
+            + "{{ '<｜DSML｜parameter name=\"' + key + '\" string=\"' }}"
+            + "{{ 'true' if value is string else 'false' }}{{ '\">' }}"
+            + _JINJA_SCALAR
+            + "{{ '</｜DSML｜parameter>' }}"
+            + end
+        )
+    if tool.args_encoding == "minimax_ns_xml":
+        ns = json.dumps(_MINIMAX_NS)
+        return (
+            loop
+            + "{{ "
+            + ns
+            + " + '<' + key + '>' }}"
+            + _JINJA_SCALAR
+            + "{{ "
+            + ns
+            + " + '</' + key + '>' }}"
+            + end
+        )
+    return "{{ tool_call.function.arguments | tojson }}"
 
 
 def to_reference_template(spec: ModelFormatSpec) -> str:
@@ -88,7 +181,7 @@ def to_reference_template(spec: ModelFormatSpec) -> str:
     The fragment consumes a ``message`` with optional ``reasoning_content``,
     ``content``, and ``tool_calls`` (OpenAI-shaped: ``function.name`` /
     ``function.arguments`` dict). It renders byte-identically to
-    :func:`render_assistant_turn`.
+    :func:`render_assistant_turn` for flat argument values.
     """
     lines: list[str] = []
     if spec.reasoning is not None:
@@ -108,29 +201,27 @@ def to_reference_template(spec: ModelFormatSpec) -> str:
     lines.append('{{ message.content or "" }}')
     if spec.tool_calls is not None:
         tool = spec.tool_calls
-        if tool.args_encoding == "qwen_xml":
-            args_fragment = (
-                "{%- for key, value in tool_call.function.arguments.items() %}"
-                "{{ '<parameter=' + key + '>\\n' }}"
-                "{{ value if value is string else value | tojson }}"
-                "{{ '\\n</parameter>' }}"
-                "{%- endfor %}"
-            )
-        else:
-            args_fragment = "{{ tool_call.function.arguments | tojson }}"
-        lines.append(
-            "{%- for tool_call in message.tool_calls or [] %}"
-            "{%- if loop.first and message.content %}"
-            + _jinja_str(tool.separator)
-            + "{%- elif not loop.first %}"
-            + _jinja_str(tool.separator)
-            + "{%- endif %}"
-            + _jinja_str(tool.call_begin)
+        call_fragment = (
+            _jinja_str(tool.call_begin)
             + _jinja_str(tool.name_prefix)
             + "{{ tool_call.function.name }}"
             + _jinja_str(tool.name_suffix)
-            + args_fragment
+            + _jinja_args_fragment(spec)
             + _jinja_str(tool.call_end)
+        )
+        lines.append(
+            "{%- if message.tool_calls %}"
+            "{%- if message.content %}"
+            + _jinja_str(tool.separator)
+            + "{%- endif %}"
+            + (_jinja_str(tool.section_begin) if tool.section_begin else "")
+            + "{%- for tool_call in message.tool_calls %}"
+            + "{%- if not loop.first %}"
+            + _jinja_str(tool.separator)
+            + "{%- endif %}"
+            + call_fragment
             + "{%- endfor %}"
+            + (_jinja_str(tool.section_end) if tool.section_end else "")
+            + "{%- endif %}"
         )
     return "".join(lines)

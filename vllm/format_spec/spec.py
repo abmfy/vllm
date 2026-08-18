@@ -49,7 +49,11 @@ class ReasoningShape:
         return self.start is not None and not self.start_in_prompt
 
 
-ArgsEncoding = Literal["json", "qwen_xml"]
+ArgsEncoding = Literal[
+    "json", "qwen_xml", "arg_key_value_xml", "dsml", "minimax_ns_xml"
+]
+
+ARGS_ENCODINGS = ("json", "qwen_xml", "arg_key_value_xml", "dsml", "minimax_ns_xml")
 
 
 @dataclass(frozen=True)
@@ -60,20 +64,34 @@ class ToolCallShape:
 
         {call_begin}{name_prefix}{NAME}{name_suffix}{ARGS}{call_end}
 
-    with ARGS encoded per ``args_encoding``:
+    with consecutive calls joined by ``separator`` and, when
+    ``section_begin`` is set, the whole run wrapped in
+    ``{section_begin}...{section_end}``. ARGS is encoded per
+    ``args_encoding``:
 
     * ``"json"``: a JSON object matching the tool's parameter schema.
-    * ``"qwen_xml"``: ``<parameter=KEY>\\nVALUE\\n</parameter>`` blocks.
+    * ``"qwen_xml"``: ``<parameter=KEY>\\nVALUE\\n</parameter>`` blocks
+      (Qwen3-Coder/3.5+, Step-3.5).
+    * ``"arg_key_value_xml"``: ``<arg_key>K</arg_key>\\n<arg_value>V
+      </arg_value>\\n`` pairs (GLM-4.x/5.x, Ling3).
+    * ``"dsml"``: ``<｜DSML｜parameter name="K" string="true|false">V
+      </｜DSML｜parameter>`` lines (DeepSeek-V4 Flash/Pro).
+    * ``"minimax_ns_xml"``: namespace-prefixed recursive element tags
+      ``{NS}<K>V{NS}</K>`` (MiniMax-M3).
 
     Attributes:
-        trigger: Literal that unambiguously starts a tool call; used both
-            as the streaming lexer terminal and the structural-tag trigger.
-        call_begin: Bytes opening one call (starts with ``trigger``).
+        trigger: Literal that unambiguously starts the tool-call region;
+            used both as the streaming lexer terminal and the
+            structural-tag trigger.
+        call_begin: Bytes opening one call.
         name_prefix: Bytes immediately preceding the function name.
         name_suffix: Bytes separating the name from the arguments.
         args_encoding: How arguments are encoded.
         call_end: Bytes closing one call.
         separator: Bytes between consecutive parallel calls.
+        section_begin: Bytes opening the whole tool-call section, empty
+            when calls are not section-wrapped.
+        section_end: Bytes closing the section.
     """
 
     trigger: str
@@ -83,15 +101,20 @@ class ToolCallShape:
     args_encoding: ArgsEncoding
     call_end: str
     separator: str = "\n"
+    section_begin: str = ""
+    section_end: str = ""
 
     def __post_init__(self) -> None:
-        if not self.call_begin.startswith(self.trigger):
+        anchor = self.section_begin or self.call_begin
+        if not anchor.startswith(self.trigger):
             raise ValueError(
-                f"call_begin {self.call_begin!r} must start with "
+                f"section_begin/call_begin {anchor!r} must start with "
                 f"trigger {self.trigger!r}"
             )
-        if self.args_encoding not in ("json", "qwen_xml"):
+        if self.args_encoding not in ARGS_ENCODINGS:
             raise ValueError(f"unsupported args_encoding: {self.args_encoding!r}")
+        if bool(self.section_begin) != bool(self.section_end):
+            raise ValueError("section_begin and section_end must be set together")
 
 
 @dataclass(frozen=True)

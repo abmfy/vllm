@@ -17,7 +17,10 @@ from xgrammar.structural_tag import (
     AnyTextFormat,
     Format,
     JSONSchemaFormat,
+    OptionalFormat,
     QwenXMLParameterFormat,
+    SequenceFormat,
+    StarFormat,
     StructuralTag,
     TagFormat,
     TagsWithSeparatorFormat,
@@ -26,19 +29,80 @@ from xgrammar.structural_tag import (
 
 from vllm.format_spec.spec import ModelFormatSpec
 
+_MINIMAX_NS = "]<]minimax[>["
+
+
+def _normalize_object_schema(parameters: dict[str, Any] | bool) -> dict[str, Any]:
+    """A bare object schema without properties would reject every value."""
+    if parameters is True:
+        return {"type": "object", "additionalProperties": True}
+    assert isinstance(parameters, dict)
+    if "properties" not in parameters:
+        return {**parameters, "additionalProperties": True}
+    return parameters
+
+
+def _minimax_ns_value_format(schema: dict[str, Any]) -> Format:
+    kind = schema.get("type")
+    if kind == "string":
+        return AnyTextFormat(excludes=[_MINIMAX_NS])
+    if kind == "object":
+        return _minimax_ns_args_format(schema)
+    if kind == "array":
+        return StarFormat(
+            content=TagFormat(
+                begin=f"{_MINIMAX_NS}<item>",
+                content=_minimax_ns_value_format(schema.get("items", {})),
+                end=f"{_MINIMAX_NS}</item>",
+            )
+        )
+    if kind in ("integer", "number", "boolean", "null"):
+        return JSONSchemaFormat(json_schema=schema)
+    return AnyTextFormat(excludes=[_MINIMAX_NS])
+
+
+def _minimax_ns_args_format(parameters: dict[str, Any] | bool) -> Format:
+    """Recursive ``{NS}<K>V{NS}</K>`` element grammar from a JSON schema.
+
+    Properties render in schema declaration order (the renderer's order);
+    optional properties may be omitted.
+    """
+    if parameters is True or not isinstance(parameters, dict):
+        return AnyTextFormat(excludes=[_MINIMAX_NS])
+    properties = parameters.get("properties")
+    if not properties:
+        return AnyTextFormat(excludes=[_MINIMAX_NS])
+    required = set(parameters.get("required", ()))
+    elements: list[Format] = []
+    for key, subschema in properties.items():
+        element: Format = TagFormat(
+            begin=f"{_MINIMAX_NS}<{key}>",
+            content=_minimax_ns_value_format(subschema),
+            end=f"{_MINIMAX_NS}</{key}>",
+        )
+        if key not in required:
+            element = OptionalFormat(content=element)
+        elements.append(element)
+    return SequenceFormat(elements=elements)
+
 
 def _args_format(spec: ModelFormatSpec, parameters: dict[str, Any] | bool) -> Format:
     assert spec.tool_calls is not None
     encoding = spec.tool_calls.args_encoding
     if encoding == "qwen_xml":
-        # A bare object schema without properties would reject every value.
-        if parameters is True:
-            parameters = {"type": "object", "additionalProperties": True}
-        elif isinstance(parameters, dict) and "properties" not in parameters:
-            parameters = {**parameters, "additionalProperties": True}
-        return QwenXMLParameterFormat(json_schema=parameters)
+        return QwenXMLParameterFormat(json_schema=_normalize_object_schema(parameters))
     if encoding == "json":
         return JSONSchemaFormat(json_schema=parameters)
+    if encoding == "arg_key_value_xml":
+        return JSONSchemaFormat(
+            json_schema=_normalize_object_schema(parameters), style="glm_xml"
+        )
+    if encoding == "dsml":
+        return JSONSchemaFormat(
+            json_schema=_normalize_object_schema(parameters), style="deepseek_xml"
+        )
+    if encoding == "minimax_ns_xml":
+        return _minimax_ns_args_format(parameters)
     raise ValueError(f"unsupported args_encoding: {encoding!r}")
 
 
@@ -80,28 +144,38 @@ def tool_structural_tag(
     """
     if spec.tool_calls is None:
         raise ValueError(f"spec {spec.name!r} declares no tool-call format")
+    shape = spec.tool_calls
     tags = tool_tag_formats(spec, tools)
+
+    def calls_run(stop_after_first: bool = False) -> Format:
+        return TagsWithSeparatorFormat(
+            tags=tags,
+            separator=shape.separator,
+            at_least_one=True,
+            stop_after_first=stop_after_first,
+        )
+
+    def wrap_section(calls: Format) -> Format:
+        if not shape.section_begin:
+            return calls
+        return TagFormat(
+            begin=shape.section_begin, content=calls, end=shape.section_end
+        )
 
     suffix: Format
     if tool_choice == "auto":
-        suffix = (
-            TriggeredTagsFormat(triggers=[spec.tool_calls.trigger], tags=tags)
-            if tags
-            else AnyTextFormat()
-        )
+        if not tags:
+            suffix = AnyTextFormat()
+        elif shape.section_begin:
+            suffix = TriggeredTagsFormat(
+                triggers=[shape.trigger], tags=[wrap_section(calls_run())]
+            )
+        else:
+            suffix = TriggeredTagsFormat(triggers=[shape.trigger], tags=tags)
     elif tool_choice == "forced":
-        suffix = TagsWithSeparatorFormat(
-            tags=tags,
-            separator=spec.tool_calls.separator,
-            at_least_one=True,
-            stop_after_first=True,
-        )
+        suffix = wrap_section(calls_run(stop_after_first=True))
     elif tool_choice == "required":
-        suffix = TagsWithSeparatorFormat(
-            tags=tags,
-            separator=spec.tool_calls.separator,
-            at_least_one=True,
-        )
+        suffix = wrap_section(calls_run())
     else:
         raise ValueError(f"unsupported tool_choice: {tool_choice!r}")
 

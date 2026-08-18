@@ -94,6 +94,26 @@ model repo's template against the spec (render a synthetic turn, compare)
 is the natural follow-up and turns template↔parser pairing from
 convention into CI.
 
+## Family coverage
+
+| Family (released models) | Encoding | Section | Parity reference | Status |
+| --- | --- | --- | --- | --- |
+| Qwen3-Coder/3.5/3.6/3.8, MiMo | `qwen_xml` | no | `qwen3_config` | equivalent |
+| Step-3.5 (stepfun) | `qwen_xml` (reused) | no | `Step3p5ToolParser` | equivalent (tool wire) |
+| Hermes / classic Qwen3 / QwQ | `json` | no | legacy hermes parser | canonical wire only |
+| GLM-4.5/4.6/4.7/**5.x**, Ling3 | `arg_key_value_xml` | no | `glm47_moe_config` | equivalent |
+| DeepSeek-V4 **Flash + Pro** | `dsml` | yes | `deepseek_v4_config` | equivalent |
+| MiniMax-M3 | `minimax_ns_xml` (recursive) | yes | Rust-parser fixtures | fixture-pinned |
+| DeepSeek-R1 (reasoning only) | — | — | — | canonicalize only |
+| Kimi-K3 (XTML channels) | — | — | — | **out of scope**: per-call `index="N"` counter attribute, schema-derived `type=` attributes, attribute escaping, and response-channel wrapping exceed a declarative literal template; stays on its dedicated parser |
+| gpt-oss (harmony) | — | — | — | stays on `openai_harmony` (already SSOT) |
+
+Five args encodings cover eight recent families; each encoding's FSM
+topology, grammar Format builder, and renderer are written once. Notably
+the `minimax_ns_xml` structural tag is net-new capability — upstream has
+NO constrained-decoding path for M3 tool calls (Rust parser only, no
+structural tag).
+
 ## Evidence (tests, all passing)
 
 * `TestGeneratedParser`: generated Qwen3 config is behaviorally identical
