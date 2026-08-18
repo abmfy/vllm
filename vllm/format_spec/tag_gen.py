@@ -118,6 +118,11 @@ def _args_format(spec: ModelFormatSpec, parameters: dict[str, Any] | bool) -> Fo
         )
     if encoding == "minimax_ns_xml":
         return _minimax_ns_args_format(parameters)
+    if encoding == "k3_xtml":
+        raise ValueError(
+            "k3_xtml structural tags are delegated to the hand-written "
+            "get_kimi_k3_structural_tag builder (variable index attribute)"
+        )
     raise ValueError(f"unsupported args_encoding: {encoding!r}")
 
 

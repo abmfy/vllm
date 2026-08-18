@@ -317,6 +317,68 @@ class TestMinimaxM3:
             )
 
 
+class TestKimiK3:
+    """K3 XTML: parser/renderer spec-generated, tag delegated to registry."""
+
+    WIRE = (
+        "<|open|>think<|sep|>step<|close|>think<|sep|>"
+        "<|open|>response<|sep|>answer<|close|>response<|sep|>"
+        '<|open|>tools<|sep|><|open|>call tool="calc" index="1"<|sep|>'
+        '<|open|>argument key="x" type="number"<|sep|>1<|close|>argument<|sep|>'
+        "<|close|>call<|sep|><|close|>tools<|sep|>"
+    )
+
+    def test_renderer_reproduces_fixture(self):
+        from vllm.format_spec.specs import KIMI_K3_SPEC
+
+        wire = render_assistant_turn(
+            KIMI_K3_SPEC,
+            reasoning="step",
+            content="answer",
+            tool_calls=[("calc", {"x": 1})],
+        )
+        assert wire == self.WIRE
+
+    def test_parser_round_trip(self):
+        from vllm.format_spec.specs import KIMI_K3_SPEC
+
+        parser = make_parser(KIMI_K3_SPEC)
+        reasoning, rest = parser.extract_reasoning(self.WIRE, make_request())
+        assert reasoning == "step"
+        _, tools_called, calls, content = extract_all(
+            make_parser(KIMI_K3_SPEC), self.WIRE
+        )
+        assert tools_called
+        assert calls == [("calc", {"x": 1})]
+        assert content == "answer"
+
+    def test_parity_with_legacy_parser(self):
+        from vllm.format_spec.specs import KIMI_K3_SPEC
+        from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
+
+        tokenizer = MagicMock()
+        tokenizer.get_vocab.return_value = {}
+        tokenizer.encode.side_effect = lambda text, **kw: [ord(c) for c in text]
+        legacy = KimiK3ToolParser(tokenizer)
+        want = legacy.extract_tool_calls(self.WIRE, make_request())
+        _, tools_called, calls, _ = extract_all(make_parser(KIMI_K3_SPEC), self.WIRE)
+        assert tools_called == want.tools_called
+        assert calls == [
+            (c.function.name, json.loads(c.function.arguments)) for c in want.tool_calls
+        ]
+
+    def test_attr_escaping_and_guards(self):
+        from vllm.format_spec.specs import KIMI_K3_SPEC
+
+        wire = render_assistant_turn(KIMI_K3_SPEC, tool_calls=[('na"me', {"x": "v"})])
+        assert 'tool="na&quot;me"' in wire
+        with pytest.raises(ValueError, match="unrenderable"):
+            render_assistant_turn(
+                KIMI_K3_SPEC,
+                tool_calls=[("f", {"x": "bad<|close|>argument<|sep|>bytes"})],
+            )
+
+
 class TestReferenceTemplates:
     """Generated Jinja fragments stay byte-identical to the renderer."""
 

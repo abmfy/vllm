@@ -24,7 +24,29 @@ _UNRENDERABLE = {
     "arg_key_value_xml": ("</arg_value>", "<arg_key>", "</tool_call>"),
     "dsml": ("</｜DSML｜parameter>", "</｜DSML｜invoke>", "</｜DSML｜tool_calls>"),
     "minimax_ns_xml": (_MINIMAX_NS,),
+    "k3_xtml": (
+        "<|close|>argument<|sep|>",
+        "<|close|>call<|sep|>",
+        "<|close|>tools<|sep|>",
+    ),
 }
+
+_K3_TYPES = {str: "string", bool: "boolean", int: "number", float: "number"}
+
+
+def k3_escape_attr(value: str) -> str:
+    return value.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def _k3_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return _K3_TYPES[type(value)]
+
 
 _UNRENDERABLE_KEY = {
     "arg_key_value_xml": ("</arg_key>",),
@@ -93,16 +115,28 @@ def _render_args(spec: ModelFormatSpec, arguments: dict[str, Any]) -> str:
         )
     if encoding == "minimax_ns_xml":
         return _render_ns_value(arguments)
+    if encoding == "k3_xtml":
+        return "".join(
+            f'<|open|>argument key="{k3_escape_attr(key)}"'
+            f' type="{_k3_type(value)}"<|sep|>'
+            f"{_guarded_scalar(encoding, value)}<|close|>argument<|sep|>"
+            for key, value in arguments.items()
+        )
     return json.dumps(arguments, ensure_ascii=False)
 
 
-def render_tool_call(spec: ModelFormatSpec, name: str, arguments: dict) -> str:
+def render_tool_call(
+    spec: ModelFormatSpec, name: str, arguments: dict, index: int = 1
+) -> str:
     tool = spec.tool_calls
     assert tool is not None
+    if tool.args_encoding == "k3_xtml":
+        name = k3_escape_attr(name)
     return (
         tool.call_begin
         + tool.name_prefix
         + name
+        + tool.call_attrs.format(index=index)
         + tool.name_suffix
         + _render_args(spec, arguments)
         + tool.call_end
@@ -124,12 +158,16 @@ def render_assistant_turn(
             parts.append(spec.reasoning.start or "")
         parts.append(reasoning)
         parts.append(spec.reasoning.end)
-    parts.append(content)
+    if content and spec.content_wrapper is not None:
+        parts.append(spec.content_wrapper[0] + content + spec.content_wrapper[1])
+    else:
+        parts.append(content)
     if tool_calls:
         tool = spec.tool_calls
         assert tool is not None
         rendered = tool.separator.join(
-            render_tool_call(spec, name, arguments) for name, arguments in tool_calls
+            render_tool_call(spec, name, arguments, index=i)
+            for i, (name, arguments) in enumerate(tool_calls, start=1)
         )
         if tool.section_prefix:
             parts.append(tool.section_prefix)
@@ -202,6 +240,11 @@ def to_reference_template(spec: ModelFormatSpec) -> str:
     ``function.arguments`` dict). It renders byte-identically to
     :func:`render_assistant_turn` for flat argument values.
     """
+    if spec.tool_calls is not None and spec.tool_calls.args_encoding == "k3_xtml":
+        raise NotImplementedError(
+            "k3_xtml reference templates need loop-position attributes and "
+            "schema-derived types; use render_assistant_turn directly"
+        )
     lines: list[str] = []
     if spec.reasoning is not None:
         start = (

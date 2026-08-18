@@ -393,12 +393,96 @@ def _sectioned_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
     return terminals, transitions, options
 
 
+_K3_ARG_RE = re.compile(
+    r'<\|open\|>argument key="([^"]*)" type="([^"]*)"<\|sep\|>'
+    r"(.*?)<\|close\|>argument<\|sep\|>",
+    re.DOTALL,
+)
+
+
+def k3_unescape_attr(value: str) -> str:
+    return value.replace("&quot;", '"').replace("&amp;", "&")
+
+
+def _k3_args_converter(raw_args: str, partial: bool) -> str:
+    """Parse K3 XTML argument blocks; values decode per the type attribute."""
+    params: dict[str, object] = {}
+    for key, kind, value in _K3_ARG_RE.findall(raw_args):
+        key = k3_unescape_attr(key)
+        if kind == "string":
+            params[key] = value
+        else:
+            try:
+                params[key] = json.loads(value)
+            except (json.JSONDecodeError, ValueError):
+                params[key] = value
+    return json.dumps(params, ensure_ascii=False)
+
+
+def _k3_xtml_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
+    """FSM for Kimi-K3 XTML: section-wrapped calls with attribute headers.
+
+    The variable ``index="N"`` attribute between name and ``<|sep|>`` is
+    consumed in TOOL_PREAMBLE (whose content is dropped); the argument
+    body is recovered by a typed-block converter. Response-channel and
+    turn-end markers are lexed and dropped in CONTENT.
+    """
+    tool = spec.tool_calls
+    assert tool is not None
+    terminals = {
+        "TOOL_START": tool.trigger,
+        "TOOL_END": tool.section_end,
+        "INVOKE_PREFIX": tool.call_begin + tool.name_prefix,
+        "NAME_END": '" index="',
+        "ATTRS_END": '"' + tool.name_suffix,
+        "CALL_END": tool.call_end,
+    }
+    drop_in_content: dict[str, None] = {}
+    if spec.content_wrapper is not None:
+        terminals["RESPONSE_OPEN"], terminals["RESPONSE_CLOSE"] = spec.content_wrapper
+        drop_in_content["RESPONSE_OPEN"] = None
+        drop_in_content["RESPONSE_CLOSE"] = None
+    for i, marker in enumerate(spec.turn_end_markers):
+        name = f"TURN_END_{i}"
+        terminals[name] = marker
+        drop_in_content[name] = None
+    transitions = {
+        (ParserState.REASONING, "TOOL_START"): Transition(
+            ParserState.TOOL_PREAMBLE,
+            (EventType.REASONING_END,),
+        ),
+        (ParserState.CONTENT, "TOOL_START"): Transition(ParserState.TOOL_PREAMBLE, ()),
+        (ParserState.TOOL_PREAMBLE, "INVOKE_PREFIX"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.TOOL_CALL_START,),
+        ),
+        (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(ParserState.CONTENT, ()),
+        # index digits land in TOOL_PREAMBLE content, which is dropped.
+        (ParserState.TOOL_NAME, "NAME_END"): Transition(ParserState.TOOL_PREAMBLE, ()),
+        (ParserState.TOOL_PREAMBLE, "ATTRS_END"): Transition(ParserState.TOOL_ARGS, ()),
+        (ParserState.TOOL_ARGS, "CALL_END"): Transition(
+            ParserState.TOOL_BETWEEN,
+            (EventType.TOOL_CALL_END,),
+        ),
+        (ParserState.TOOL_BETWEEN, "INVOKE_PREFIX"): Transition(
+            ParserState.TOOL_NAME,
+            (EventType.TOOL_CALL_START,),
+        ),
+        (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(ParserState.CONTENT, ()),
+    }
+    for name in drop_in_content:
+        transitions[(ParserState.CONTENT, name)] = Transition(ParserState.CONTENT, ())
+    options = {"arg_converter": _k3_args_converter, "tool_args_json": False}
+    return terminals, transitions, options
+
+
 _TOOL_CONFIG_BUILDERS = {
     "json": _json_tool_config,
     "qwen_xml": _qwen_xml_tool_config,
     "arg_key_value_xml": _arg_key_value_xml_tool_config,
     "dsml": _sectioned_tool_config,
     "minimax_ns_xml": _sectioned_tool_config,
+    "k3_xtml": _k3_xtml_tool_config,
 }
 
 

@@ -105,7 +105,7 @@ convention into CI.
 | DeepSeek-V4 **Flash + Pro** | `dsml` | yes | `deepseek_v4_config` | equivalent |
 | MiniMax-M3 | `minimax_ns_xml` (recursive) | yes | Rust-parser fixtures | fixture-pinned |
 | DeepSeek-R1 (reasoning only) | — | — | — | canonicalize only |
-| Kimi-K3 (XTML channels) | — | — | — | **out of scope**: per-call `index="N"` counter attribute, schema-derived `type=` attributes, attribute escaping, and response-channel wrapping exceed a declarative literal template; stays on its dedicated parser |
+| Kimi-K3 (XTML channels) | `k3_xtml` | yes | `KimiK3ToolParser` | **partial**: parser/renderer spec-generated (equivalent on fixtures) via `call_attrs` index template, `content_wrapper` response channel, typed argument blocks with attribute escaping; structural tag stays delegated to the hand-written `get_kimi_k3_structural_tag` (digits-regex index), reference template not generated |
 | gpt-oss (harmony) | — | — | — | stays on `openai_harmony` (already SSOT) |
 
 Five args encodings cover eight recent families; each encoding's FSM

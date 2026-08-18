@@ -136,9 +136,36 @@ QWEN35_SPEC = ModelFormatSpec(
     tool_calls=QWEN3_SPEC.tool_calls,
 )
 
+# Kimi-K3 XTML channels. Parser/renderer/template are spec-generated; the
+# structural tag stays on the hand-written get_kimi_k3_structural_tag
+# builder (the per-call index attribute needs a digits regex).
+KIMI_K3_SPEC = ModelFormatSpec(
+    name="kimi_k3",
+    reasoning=ReasoningShape(
+        start="<|open|>think<|sep|>",
+        end="<|close|>think<|sep|>",
+        toggle_kwarg="thinking",
+    ),
+    tool_calls=ToolCallShape(
+        trigger="<|open|>tools<|sep|>",
+        section_begin="<|open|>tools<|sep|>",
+        section_end="<|close|>tools<|sep|>",
+        call_begin="<|open|>call ",
+        name_prefix='tool="',
+        call_attrs='" index="{index}"',
+        name_suffix="<|sep|>",
+        args_encoding="k3_xtml",
+        call_end="<|close|>call<|sep|>",
+        separator="",
+    ),
+    content_wrapper=("<|open|>response<|sep|>", "<|close|>response<|sep|>"),
+    turn_end_markers=("<|close|>message<|sep|>",),
+)
+
 FORMAT_SPECS = {
     spec.name: spec
     for spec in (
+        KIMI_K3_SPEC,
         QWEN3_SPEC,
         HERMES_SPEC,
         DEEPSEEK_R1_SPEC,

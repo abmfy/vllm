@@ -55,10 +55,17 @@ class ReasoningShape:
 
 
 ArgsEncoding = Literal[
-    "json", "qwen_xml", "arg_key_value_xml", "dsml", "minimax_ns_xml"
+    "json", "qwen_xml", "arg_key_value_xml", "dsml", "minimax_ns_xml", "k3_xtml"
 ]
 
-ARGS_ENCODINGS = ("json", "qwen_xml", "arg_key_value_xml", "dsml", "minimax_ns_xml")
+ARGS_ENCODINGS = (
+    "json",
+    "qwen_xml",
+    "arg_key_value_xml",
+    "dsml",
+    "minimax_ns_xml",
+    "k3_xtml",
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,9 @@ class ToolCallShape:
     # Bytes emitted before section_begin (e.g. DSML's "\n\n"); when empty,
     # the renderer falls back to `separator` after non-empty content.
     section_prefix: str = ""
+    # Per-call attribute bytes between name and name_suffix; "{index}" is
+    # replaced with the 1-based call position (K3's index="N").
+    call_attrs: str = ""
 
     def __post_init__(self) -> None:
         anchor = self.section_begin or self.call_begin
@@ -132,3 +142,7 @@ class ModelFormatSpec:
     name: str
     reasoning: ReasoningShape | None = None
     tool_calls: ToolCallShape | None = None
+    # (open, close) markers wrapping plain content (K3's response channel).
+    content_wrapper: tuple[str, str] | None = None
+    # Trailing markers the model may emit before EOS (dropped by the parser).
+    turn_end_markers: tuple[str, ...] = ()
