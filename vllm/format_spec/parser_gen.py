@@ -53,11 +53,11 @@ def _reasoning_transitions(
         transitions[(ParserState.REASONING, "THINK_START")] = Transition(
             ParserState.REASONING, ()
         )
-        # A start marker mid-content re-enters reasoning (GLM/DSML style).
-        transitions[(ParserState.CONTENT, "THINK_START")] = Transition(
-            ParserState.REASONING,
-            (EventType.REASONING_START,),
-        )
+        if spec.reasoning.content_reenters_reasoning:
+            transitions[(ParserState.CONTENT, "THINK_START")] = Transition(
+                ParserState.REASONING,
+                (EventType.REASONING_START,),
+            )
     return transitions
 
 
@@ -259,6 +259,7 @@ def _arg_key_value_xml_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, d
         "arg_converter": _glm47_arg_converter,
         "tool_args_json": False,
         "validate_tool_names": True,
+        "strip_tool_names": True,
     }
     return terminals, transitions, options
 
@@ -292,9 +293,17 @@ def _minimax_ns_args_converter(raw_args: str, partial: bool) -> str:
     if partial:
         while len(stack) > 1:
             name, children, texts = stack.pop()
-            value = children if children else "".join(texts)
-            _ns_insert(stack[-1][1], name, value)
-    return json.dumps(_ns_finalize(root), ensure_ascii=False)
+            text = "".join(texts)
+            if not children and not text:
+                # Type undetermined: keep partial output prefix-stable.
+                continue
+            _ns_insert(stack[-1][1], name, children if children else text)
+    # The root is always the arguments object; item-collapse applies only
+    # to nested values.
+    return json.dumps(
+        {key: _ns_finalize(value) for key, value in root.items()},
+        ensure_ascii=False,
+    )
 
 
 def _ns_insert(container: dict, name: str, value) -> None:
@@ -324,7 +333,8 @@ def _sectioned_tool_config(spec: ModelFormatSpec) -> tuple[dict, dict, dict]:
 
     ``{section_begin} {name_prefix}NAME{name_suffix}ARGS{call_end} ...
     {section_end}`` — mirrors the hand-written ``deepseek_v4_config``
-    topology.
+    topology, plus one deliberate addition: an empty-section recovery
+    transition (TOOL_PREAMBLE, TOOL_END) the reference lacks.
     """
     tool = spec.tool_calls
     assert tool is not None
@@ -402,8 +412,13 @@ def to_parser_engine_config(
         spec: The model format description.
         thinking: Whether this request starts in the reasoning state.
     """
-    terminals = _reasoning_terminals(spec)
-    transitions = _reasoning_transitions(spec)
+    if spec.reasoning is not None and spec.reasoning.forced:
+        thinking = True
+    keep_markers = spec.reasoning is not None and (
+        thinking or spec.reasoning.markers_when_disabled
+    )
+    terminals = _reasoning_terminals(spec) if keep_markers else {}
+    transitions = _reasoning_transitions(spec) if keep_markers else {}
     options: dict = {}
 
     if spec.tool_calls is not None:
@@ -413,8 +428,6 @@ def to_parser_engine_config(
         terminals.update(tool_terminals)
         transitions.update(tool_transitions)
 
-    if spec.reasoning is not None and spec.reasoning.forced:
-        thinking = True
     start_in_reasoning = thinking and spec.reasoning is not None
 
     token_id_terminal_names = ("THINK_START", "THINK_END", "TOOL_START", "TOOL_END")

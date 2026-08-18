@@ -61,6 +61,8 @@ class TestGeneratedParser:
     QWEN3_FIXTURES = [
         "plain answer, no markup",
         "<think>pondering</think>the answer",
+        # Qwen3 does NOT re-enter reasoning on a mid-content <think>.
+        "thought</think>answer <think>relapse</think> more",
         (
             "<think>let me check</think>I'll look it up.\n"
             "<tool_call>\n<function=get_weather>\n"

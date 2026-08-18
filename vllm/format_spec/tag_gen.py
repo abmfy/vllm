@@ -15,12 +15,13 @@ from typing import Any
 
 from xgrammar.structural_tag import (
     AnyTextFormat,
+    ConstStringFormat,
     Format,
     JSONSchemaFormat,
     OptionalFormat,
+    PlusFormat,
     QwenXMLParameterFormat,
     SequenceFormat,
-    StarFormat,
     StructuralTag,
     TagFormat,
     TagsWithSeparatorFormat,
@@ -49,7 +50,9 @@ def _minimax_ns_value_format(schema: dict[str, Any]) -> Format:
     if kind == "object":
         return _minimax_ns_args_format(schema)
     if kind == "array":
-        return StarFormat(
+        # PlusFormat (not Star): the wire cannot represent an empty array,
+        # so the grammar must not admit one the parser misreads as "".
+        return PlusFormat(
             content=TagFormat(
                 begin=f"{_MINIMAX_NS}<item>",
                 content=_minimax_ns_value_format(schema.get("items", {})),
@@ -58,7 +61,9 @@ def _minimax_ns_value_format(schema: dict[str, Any]) -> Format:
         )
     if kind in ("integer", "number", "boolean", "null"):
         return JSONSchemaFormat(json_schema=schema)
-    return AnyTextFormat(excludes=[_MINIMAX_NS])
+    raise ValueError(
+        f"minimax_ns_xml cannot express schema without a recognized type: {schema!r}"
+    )
 
 
 def _minimax_ns_args_format(parameters: dict[str, Any] | bool) -> Format:
@@ -75,6 +80,10 @@ def _minimax_ns_args_format(parameters: dict[str, Any] | bool) -> Format:
     required = set(parameters.get("required", ()))
     elements: list[Format] = []
     for key, subschema in properties.items():
+        if key == "item":
+            # "item" is the reserved array-element tag; a property with
+            # that name would be indistinguishable from a list on parse.
+            raise ValueError("minimax_ns_xml cannot express a property named 'item'")
         element: Format = TagFormat(
             begin=f"{_MINIMAX_NS}<{key}>",
             content=_minimax_ns_value_format(subschema),
@@ -94,12 +103,18 @@ def _args_format(spec: ModelFormatSpec, parameters: dict[str, Any] | bool) -> Fo
     if encoding == "json":
         return JSONSchemaFormat(json_schema=parameters)
     if encoding == "arg_key_value_xml":
+        # any_order matches the parser's leniency and the renderer's
+        # dict-insertion order, which need not match schema order.
         return JSONSchemaFormat(
-            json_schema=_normalize_object_schema(parameters), style="glm_xml"
+            json_schema=_normalize_object_schema(parameters),
+            style="glm_xml",
+            any_order=True,
         )
     if encoding == "dsml":
         return JSONSchemaFormat(
-            json_schema=_normalize_object_schema(parameters), style="deepseek_xml"
+            json_schema=_normalize_object_schema(parameters),
+            style="deepseek_xml",
+            any_order=True,
         )
     if encoding == "minimax_ns_xml":
         return _minimax_ns_args_format(parameters)
@@ -155,12 +170,20 @@ def tool_structural_tag(
             stop_after_first=stop_after_first,
         )
 
-    def wrap_section(calls: Format) -> Format:
+    def wrap_section(calls: Format, with_prefix: bool = False) -> Format:
         if not shape.section_begin:
             return calls
-        return TagFormat(
+        section: Format = TagFormat(
             begin=shape.section_begin, content=calls, end=shape.section_end
         )
+        if with_prefix and shape.section_prefix:
+            section = SequenceFormat(
+                elements=[
+                    ConstStringFormat(value=shape.section_prefix),
+                    section,
+                ]
+            )
+        return section
 
     suffix: Format
     if tool_choice == "auto":
@@ -173,9 +196,9 @@ def tool_structural_tag(
         else:
             suffix = TriggeredTagsFormat(triggers=[shape.trigger], tags=tags)
     elif tool_choice == "forced":
-        suffix = wrap_section(calls_run(stop_after_first=True))
+        suffix = wrap_section(calls_run(stop_after_first=True), with_prefix=True)
     elif tool_choice == "required":
-        suffix = wrap_section(calls_run())
+        suffix = wrap_section(calls_run(), with_prefix=True)
     else:
         raise ValueError(f"unsupported tool_choice: {tool_choice!r}")
 

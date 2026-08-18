@@ -20,11 +20,23 @@ from vllm.format_spec.spec import ModelFormatSpec
 _MINIMAX_NS = "]<]minimax[>["
 
 _UNRENDERABLE = {
-    "qwen_xml": ("</parameter>", "<parameter=", "</function>"),
-    "arg_key_value_xml": ("</arg_value>", "<arg_key>"),
-    "dsml": ("</｜DSML｜parameter>",),
+    "qwen_xml": ("</parameter>", "<parameter=", "</function>", "</tool_call>"),
+    "arg_key_value_xml": ("</arg_value>", "<arg_key>", "</tool_call>"),
+    "dsml": ("</｜DSML｜parameter>", "</｜DSML｜invoke>", "</｜DSML｜tool_calls>"),
     "minimax_ns_xml": (_MINIMAX_NS,),
 }
+
+_UNRENDERABLE_KEY = {
+    "arg_key_value_xml": ("</arg_key>",),
+    "dsml": ('"',),
+}
+
+
+def _guard_key(encoding: str, key: str) -> str:
+    for marker in _UNRENDERABLE_KEY.get(encoding, ()):
+        if marker in key:
+            raise ValueError(f"argument key contains unrenderable {marker!r}")
+    return key
 
 
 def _scalar(value: Any) -> str:
@@ -40,7 +52,12 @@ def _guarded_scalar(encoding: str, value: Any) -> str:
 
 
 def _render_ns_value(value: Any) -> str:
+    if isinstance(value, (dict, list)) and not value:
+        # The wire cannot distinguish empty collections from empty strings.
+        raise ValueError("minimax_ns_xml cannot render an empty dict/list value")
     if isinstance(value, dict):
+        if "item" in value:
+            raise ValueError("minimax_ns_xml cannot render a key named 'item'")
         return "".join(
             f"{_MINIMAX_NS}<{key}>{_render_ns_value(item)}{_MINIMAX_NS}</{key}>"
             for key, item in value.items()
@@ -63,13 +80,13 @@ def _render_args(spec: ModelFormatSpec, arguments: dict[str, Any]) -> str:
         )
     if encoding == "arg_key_value_xml":
         return "".join(
-            f"<arg_key>{key}</arg_key>\n"
+            f"<arg_key>{_guard_key(encoding, key)}</arg_key>\n"
             f"<arg_value>{_guarded_scalar(encoding, value)}</arg_value>\n"
             for key, value in arguments.items()
         )
     if encoding == "dsml":
         return "\n".join(
-            f'<｜DSML｜parameter name="{key}" '
+            f'<｜DSML｜parameter name="{_guard_key(encoding, key)}" '
             f'string="{"true" if isinstance(value, str) else "false"}">'
             f"{_guarded_scalar(encoding, value)}</｜DSML｜parameter>"
             for key, value in arguments.items()
@@ -114,7 +131,9 @@ def render_assistant_turn(
         rendered = tool.separator.join(
             render_tool_call(spec, name, arguments) for name, arguments in tool_calls
         )
-        if content:
+        if tool.section_prefix:
+            parts.append(tool.section_prefix)
+        elif content:
             parts.append(tool.separator)
         parts.append(tool.section_begin + rendered + tool.section_end)
     return "".join(parts)
@@ -209,11 +228,18 @@ def to_reference_template(spec: ModelFormatSpec) -> str:
             + _jinja_args_fragment(spec)
             + _jinja_str(tool.call_end)
         )
+        prefix_fragment = (
+            _jinja_str(tool.section_prefix)
+            if tool.section_prefix
+            else (
+                "{%- if message.content %}"
+                + _jinja_str(tool.separator)
+                + "{%- endif %}"
+            )
+        )
         lines.append(
             "{%- if message.tool_calls %}"
-            "{%- if message.content %}"
-            + _jinja_str(tool.separator)
-            + "{%- endif %}"
+            + prefix_fragment
             + (_jinja_str(tool.section_begin) if tool.section_begin else "")
             + "{%- for tool_call in message.tool_calls %}"
             + "{%- if not loop.first %}"

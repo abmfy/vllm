@@ -126,6 +126,40 @@ class TestGlmParity:
         assert tag_accepts(tag, 'let me think</think>{"city": "Beijing"}')
         assert not tag_accepts(tag, '<think>x</think>{"city": "Beijing"}')
 
+    def test_streaming_with_tools_keeps_calls(self):
+        from tests.parser.engine.streaming_helpers import simulate_tool_streaming
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionToolsParam,
+        )
+
+        tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function={"name": "get_weather", "parameters": CITY_SCHEMA},
+            )
+        ]
+        config = to_parser_engine_config(GLM_SPEC)
+        vocab = {
+            text: 100 + i for i, text in enumerate(config.token_id_terminals.values())
+        }
+        parser = ParserEngine(
+            make_mock_tokenizer(vocab), tools=tools, parser_engine_config=config
+        )
+        wire = (
+            "<tool_call>get_weather\n<arg_key>city</arg_key>"
+            "<arg_value>Beijing</arg_value>\n</tool_call>"
+        )
+        chunks = [wire[i : i + 4] for i in range(0, len(wire), 4)]
+        results = simulate_tool_streaming(parser, make_request(), chunks)
+        names = [
+            tc.function.name
+            for dm, _ in results
+            if dm and dm.tool_calls
+            for tc in dm.tool_calls
+            if tc.function and tc.function.name
+        ]
+        assert names == ["get_weather"]
+
 
 class TestDeepSeekV4Parity:
     """Generated DSML config vs the hand-written deepseek_v4_config."""
@@ -269,6 +303,18 @@ class TestMinimaxM3:
         )
         assert reasoning == "pondering"
         assert rest == "answer"
+
+    def test_item_key_and_empty_collections_rejected(self):
+        with pytest.raises(ValueError, match="item"):
+            render_assistant_turn(MINIMAX_M3_SPEC, tool_calls=[("f", {"item": "solo"})])
+        with pytest.raises(ValueError, match="empty"):
+            render_assistant_turn(MINIMAX_M3_SPEC, tool_calls=[("f", {"tags": []})])
+        with pytest.raises(ValueError, match="item"):
+            tool_structural_tag(
+                MINIMAX_M3_SPEC,
+                [("f", {"type": "object", "properties": {"item": {"type": "string"}}})],
+                "required",
+            )
 
 
 class TestReferenceTemplates:

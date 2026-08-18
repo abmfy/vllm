@@ -96,6 +96,10 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Strip surrounding whitespace from streamed tool names before
+    # validation/emission (formats whose name run includes a newline).
+    strip_tool_names: bool = False
+
     @cached_property
     def terminal_defs(self):
         from vllm.parser.engine.incremental_lexer import terminals_from_literals

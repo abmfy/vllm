@@ -42,6 +42,11 @@ class ReasoningShape:
     start_in_prompt: bool = False
     forced: bool = False
     toggle_kwarg: str | None = "enable_thinking"
+    # A start marker appearing mid-content re-enters reasoning (GLM, DSML).
+    content_reenters_reasoning: bool = False
+    # Whether marker terminals stay active when thinking is disabled
+    # (GLM's reference config drops them; DeepSeek-V4's keeps them).
+    markers_when_disabled: bool = True
 
     @property
     def emits_start(self) -> bool:
@@ -103,6 +108,9 @@ class ToolCallShape:
     separator: str = "\n"
     section_begin: str = ""
     section_end: str = ""
+    # Bytes emitted before section_begin (e.g. DSML's "\n\n"); when empty,
+    # the renderer falls back to `separator` after non-empty content.
+    section_prefix: str = ""
 
     def __post_init__(self) -> None:
         anchor = self.section_begin or self.call_begin

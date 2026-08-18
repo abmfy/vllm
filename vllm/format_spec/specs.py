@@ -51,7 +51,13 @@ DEEPSEEK_R1_SPEC = ModelFormatSpec(
 # <think> is seeded by the chat template; output carries only </think>.
 GLM_SPEC = ModelFormatSpec(
     name="glm_4_7",
-    reasoning=ReasoningShape(start="<think>", end="</think>", start_in_prompt=True),
+    reasoning=ReasoningShape(
+        start="<think>",
+        end="</think>",
+        start_in_prompt=True,
+        content_reenters_reasoning=True,
+        markers_when_disabled=False,
+    ),
     tool_calls=ToolCallShape(
         trigger="<tool_call>",
         call_begin="<tool_call>",
@@ -70,11 +76,13 @@ DEEPSEEK_V4_SPEC = ModelFormatSpec(
         end="</think>",
         start_in_prompt=True,
         toggle_kwarg="thinking",
+        content_reenters_reasoning=True,
     ),
     tool_calls=ToolCallShape(
         trigger="<｜DSML｜tool_calls>",
         section_begin="<｜DSML｜tool_calls>\n",
         section_end="\n</｜DSML｜tool_calls>",
+        section_prefix="\n\n",
         call_begin="",
         name_prefix='<｜DSML｜invoke name="',
         name_suffix='">\n',
