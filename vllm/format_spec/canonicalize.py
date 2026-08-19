@@ -98,6 +98,26 @@ def wrap_with_reasoning(
     """
     if spec.reasoning is not None and spec.reasoning.forced:
         thinking = True
+    if spec.content_wrapper is not None:
+        open_marker, close_marker = spec.content_wrapper
+        if thinking:
+            # The channel-open marker is MANDATORY: every branch after the
+            # reasoning section begins at a marker, so the mask lands on
+            # the marker's first token and a model reaching for a partial
+            # marker is never stranded mid-literal in free text.
+            final = SequenceFormat(
+                elements=[
+                    ConstStringFormat(value=open_marker),
+                    final,
+                    ConstStringFormat(value=close_marker),
+                ]
+            )
+        else:
+            # The prompt already opened the channel; generation starts
+            # inside the body and only the close marker is emitted.
+            final = SequenceFormat(
+                elements=[final, ConstStringFormat(value=close_marker)]
+            )
     element = reasoning_element(spec) if thinking else None
     if element is None:
         return StructuralTag(format=final)

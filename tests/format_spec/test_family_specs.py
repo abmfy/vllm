@@ -367,6 +367,47 @@ class TestKimiK3:
             (c.function.name, json.loads(c.function.arguments)) for c in want.tool_calls
         ]
 
+    def test_channel_protocol_anchored(self):
+        """Mirror of internal PR #352's validation: with thinking on, every
+        branch begins at a marker — free text and partial turn-end markers
+        are unreachable at constrained positions, EOS is masked until the
+        full wire completes (no empty turn, no stranding mid-literal)."""
+        import xgrammar as xgr
+        from xgrammar.testing import _is_grammar_accept_string
+
+        from vllm.format_spec.specs import KIMI_K3_SPEC
+
+        tag = canonicalize_structured_outputs(
+            KIMI_K3_SPEC, StructuredOutputsParams(json=CITY_SCHEMA)
+        )
+        grammar = xgr.Grammar.from_structural_tag(tag)
+
+        def viable(prefix: str) -> bool:
+            return _is_grammar_accept_string(grammar, prefix, require_termination=False)
+
+        think = "<|open|>think<|sep|>step<|close|>think<|sep|>"
+        wire = (
+            think + '<|open|>response<|sep|>{"city": "Paris"}<|close|>response<|sep|>'
+        )
+        # Boundary is a non-event: every draft cut point is viable.
+        assert all(viable(wire[:cut]) for cut in range(len(wire) + 1))
+        # Position 0 and post-think are anchored: only channel-open markers.
+        for stranded in ("x", "<|close|>message"):
+            assert not viable(stranded)
+            assert not viable(think + stranded)
+        assert viable("<|open|>")
+        # EOS masked everywhere before completion: no empty/derailed turn.
+        assert not any(
+            _is_grammar_accept_string(grammar, wire[:cut]) for cut in range(len(wire))
+        )
+        assert _is_grammar_accept_string(grammar, wire)
+        # Thinking off: prompt already opened the channel; generation
+        # starts inside the body, byte-compatible with the prefill.
+        tag_off = canonicalize_structured_outputs(
+            KIMI_K3_SPEC, StructuredOutputsParams(json=CITY_SCHEMA), thinking=False
+        )
+        assert tag_accepts(tag_off, '{"city": "Paris"}<|close|>response<|sep|>')
+
     def test_attr_escaping_and_guards(self):
         from vllm.format_spec.specs import KIMI_K3_SPEC
 
