@@ -123,6 +123,42 @@ def _make_completion_tokens_details(
     return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
 
 
+
+# Experiment: pin a conversation to one DP engine so its prefix cache is reused.
+# VLLM_DP_SESSION_AFFINITY_SIZE = number of DP engines; VLLM_DP_SESSION_AFFINITY_KEY = header | body.
+_AFFINITY_STATS = {"n": 0, "header_present": 0, "by_header": 0, "by_body": 0, "none": 0}
+
+
+def _session_affinity_rank(request, raw_request):
+    import json as _json
+    import os
+    import zlib
+
+    size = int(os.environ.get("VLLM_DP_SESSION_AFFINITY_SIZE", "0"))
+    if size <= 1:
+        return None
+    header = raw_request.headers.get("x-correlation-id") if raw_request else None
+    key = header if os.environ.get("VLLM_DP_SESSION_AFFINITY_KEY") == "header" else None
+    source = "by_header" if key else "none"
+    if not key:
+        for message in request.messages:
+            if isinstance(message, dict):
+                role, content = message.get("role"), message.get("content")
+            else:
+                role, content = getattr(message, "role", None), getattr(message, "content", None)
+            if role == "user":
+                if not isinstance(content, str):
+                    content = _json.dumps(content, sort_keys=True, default=str)
+                key, source = content, "by_body"
+                break
+    stats = _AFFINITY_STATS
+    stats["n"] += 1
+    stats["header_present"] += header is not None
+    stats[source] += 1
+    if stats["n"] % 200 == 1:
+        logger.info("dp session affinity stats: %s", stats)
+    return zlib.crc32(key.encode()) % size if key else None
+
 class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
@@ -345,6 +381,8 @@ class OpenAIServingChat(GenerateBaseServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        if data_parallel_rank is None:
+            data_parallel_rank = _session_affinity_rank(request, raw_request)
 
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
