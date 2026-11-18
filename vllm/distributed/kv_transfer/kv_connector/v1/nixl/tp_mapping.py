@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -61,6 +61,9 @@ class TPMapping:
     # a request's blocks only once that many notifications have come in.
     local_consumers: int = 1
 
+    # Per source rank overrides of `local_consumers`, when ranks differ.
+    consumers_per_source_rank: dict[int, int] = field(default_factory=dict)
+
 
 # ======================================================================
 # TP mapping computation
@@ -87,6 +90,7 @@ def compute_tp_mapping(
     group_spec_types: tuple[type[KVCacheSpec], ...],
     remote_dcp_size: int = 1,
     head_sharded_kv_heads: int | None = None,
+    _count_peers: bool = True,
 ) -> TPMapping:
     """Build the complete local-to-remote TP mapping.
 
@@ -165,6 +169,21 @@ def compute_tp_mapping(
     local_consumers = transfer_topology.dcp_consumer_count(
         remote_tp_size, remote_dcp_size
     )
+    consumers_per_source_rank: dict[int, int] = {}
+    if has_ssm and remote_dcp_size > 1 and tp_size < remote_tp_size and _count_peers:
+        # Attention reads follow the DCP shards and SSM reads the TP shards,
+        # so the number of local readers varies by source rank.
+        for local_rank in range(tp_size):
+            peer = compute_tp_mapping(
+                replace(transfer_topology, tp_rank=local_rank),
+                remote_tp_size,
+                group_spec_types,
+                remote_dcp_size,
+                head_sharded_kv_heads,
+                _count_peers=False,
+            )
+            for r in peer.all_source_ranks:
+                consumers_per_source_rank[r] = consumers_per_source_rank.get(r, 0) + 1
 
     return TPMapping(
         source_ranks_per_group=source_ranks_per_group,
@@ -172,4 +191,5 @@ def compute_tp_mapping(
         rank_to_attention_slot=rank_to_attention_slot,
         rank_offset_factor=rank_offset_factor,
         local_consumers=local_consumers,
+        consumers_per_source_rank=consumers_per_source_rank,
     )

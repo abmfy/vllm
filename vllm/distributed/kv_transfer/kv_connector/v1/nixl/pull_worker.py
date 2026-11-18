@@ -460,7 +460,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     local_xfer_side_handle=local_xfer_side_handle,
                     local_dram_handle=local_dram_handle,
                     remote_xfer_side_handle=stage.xfer_side_handles[spec.remote_rank],
-                    expected_consumers=plan.local_consumers,
+                    expected_consumers=plan.consumers_per_source_rank.get(
+                        spec.remote_rank, plan.local_consumers
+                    ),
                     awaiting_kvs=meta.awaiting_kvs,
                     region_pairs=stage.pairs,
                     remote_region_num_blocks=stage.region_num_blocks,

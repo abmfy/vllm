@@ -631,8 +631,11 @@ class TransferTopology:
             # Keep every remote rank whose slice sits inside mine. When
             # local_dcp_size == 1 (replicated locally), local_dcp_rank == 0 reduces to
             # every remote rank, since no single one holds the whole sequence.
+            # Remote ranks beyond its DCP size replicate the first DCP group.
             return [
-                r for r in range(remote_tp_size) if r % local_dcp_size == local_dcp_rank
+                r
+                for r in range(remote_dcp_size)
+                if r % local_dcp_size == local_dcp_rank
             ]
         # Local finer-grained: exactly one remote rank covers my whole slice
         return [local_dcp_rank % remote_dcp_size]
@@ -653,14 +656,18 @@ class TransferTopology:
         exactly to the DTP>=PTP case, since a sharded local side
         already has `tp_size == dcp_size`.
         """
-        if remote_dcp_size > 1:
-            return self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
-
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
-            return [self.tp_rank // tp_ratio]
-        abs_ratio = -tp_ratio
-        return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
+            tp_ranks = [self.tp_rank // tp_ratio]
+        else:
+            tp_ranks = [self.tp_rank * -tp_ratio + i for i in range(-tp_ratio)]
+        if remote_dcp_size > 1:
+            dcp_ranks = self.dcp_source_ranks(remote_tp_size, remote_dcp_size)
+            if self.is_mamba and tp_ratio < 0:
+                # SSM state is TP-sharded, independently of the DCP shards.
+                return sorted({*dcp_ranks, *tp_ranks})
+            return dcp_ranks
+        return tp_ranks
 
     def dcp_consumer_count(self, remote_tp_size: int, remote_dcp_size: int) -> int:
         """How many local ranks (in aggregate) read from a given remote rank.

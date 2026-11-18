@@ -598,6 +598,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         for c in self._connectors:
+            # Connectors without a handshake (e.g. CPU offload) take no metadata.
+            if (
+                type(c).set_xfer_handshake_metadata
+                is KVConnectorBase_V1.set_xfer_handshake_metadata
+                and type(c).set_xfer_handshake_metadata_pp_aware
+                is KVConnectorBase_V1.set_xfer_handshake_metadata_pp_aware
+            ):
+                continue
             c.set_xfer_handshake_metadata_pp_aware(metadata)
 
     def _aggregate_request_finished(
