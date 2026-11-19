@@ -1174,9 +1174,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if num_mqa_tokens > 0:
             mqa_output_slice = output[:num_mqa_tokens]
+            shardq = getattr(attn_metadata, "shardq", None)
+            # A DCP ShardQ step attends the gathered KV with this rank's token
+            # shard: no query gather and no partial-output merge across ranks.
+            dcp_merge = self.impl.dcp_world_size > 1 and shardq is None
             if mqa_q_prepared is not None:
+                assert shardq is None or self.impl.dcp_world_size == 1
                 mqa_q = mqa_q_prepared[:num_mqa_tokens]
             elif q_dcp_replicated is not None:
+                assert dcp_merge
                 mqa_q = self._prepare_mqa_query(
                     q_dcp_replicated[:num_mqa_tokens], qrep_decode=True
                 )
@@ -1185,8 +1191,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     q[:num_mqa_tokens],
                     qrep_decode=False,
                     fused_q_heads=self._fused_decode_query_heads(attn_metadata),
+                    dcp_query_gather=shardq is None,
                 )
-            shardq = getattr(attn_metadata, "shardq", None)
             mqa_metadata = attn_metadata
             if shardq is not None:
                 decode_q, mqa_q = shard_q(mqa_q, shardq)
@@ -1206,7 +1212,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_out = unshard_out(attn_out, shardq, decode_out)
 
             # correct dcp attn_out with lse.
-            if self.impl.dcp_world_size > 1:
+            if dcp_merge:
                 assert lse is not None
                 assert self.dcp_manager is not None
                 decode_metadata = getattr(attn_metadata, "decode", None)
@@ -1255,7 +1261,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection, unless the DCP merge already applied it
-            if self.W_UV_dcp is None:
+            if self.W_UV_dcp is None or not dcp_merge:
                 self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
@@ -1354,6 +1360,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         mqa_q: torch.Tensor,
         qrep_decode: bool,
         fused_q_heads: int | None = None,
+        dcp_query_gather: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
         mqa_q_nope, mqa_q_pe = mqa_q.split(
@@ -1464,7 +1471,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if isinstance(mqa_q, tuple):
                     # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                     mqa_q = torch.cat(mqa_q, dim=-1)
-                if not qrep_decode:
+                if not qrep_decode and dcp_query_gather:
                     assert self.dcp_manager.query_gather is not None
                     mqa_q = self.dcp_manager.query_gather(mqa_q)
         return mqa_q

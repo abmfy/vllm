@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     FUSED_MQA_TOPK_MAX_KEYS,
@@ -1601,7 +1602,32 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             req_idx = None
             shard_rows = None
-            if self.use_pcp and self.dcp_world_size > 1:
+            if shardq_gather_indices is not None and self.dcp_world_size > 1:
+                # A DCP ShardQ step scores this rank's tokens against the
+                # all-gather of every rank's keys. The gathers are collectives,
+                # so every rank plans the same chunks: from each request's
+                # largest DCP shard and a rank-independent bound on a rank's
+                # tokens (two zigzag chunks of ceil(n / (2 * world))).
+                assert self.compress_ratio == 1 and num_decodes == 0
+                req_idx = np.arange(num_reqs)
+                shard_rows = get_dcp_local_seq_lens(
+                    seq_lens_cpu[:num_reqs],
+                    self.dcp_world_size,
+                    0,
+                    self.cp_kv_cache_interleave_size,
+                ).numpy()
+                world = get_tp_group().world_size
+                request_query_lens = torch.diff(
+                    common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+                )
+                chunk_specs = self._split_pcp_dcp_prefill_chunks(
+                    req_idx,
+                    shard_rows,
+                    2 * ((request_query_lens + 2 * world - 1) // (2 * world)),
+                    max_logits_bytes,
+                    request_offset=0,
+                )
+            elif self.use_pcp and self.dcp_world_size > 1:
                 # The gathered KV must be packed identically on every PCP rank:
                 # chunk by request from its DCP shard rows, which every rank
                 # holds. A dummy batch bypasses the PCP manager and has one
@@ -1987,8 +2013,16 @@ def build_prefill_chunk_metadata(
         this_rank_counts = local_seq_lens[:, dcp_rank].to(torch.int32)
         local_cu_seq_lens = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
         torch.cumsum(this_rank_counts, dim=0, out=local_cu_seq_lens[1:])
-        local_total_seq_lens = int(local_cu_seq_lens[-1].item())
-        max_local_total_seq_lens = int(local_seq_lens.sum(dim=0).max().item())
+        # Scalar totals from the CPU copy: reading them off the GPU tensors
+        # would synchronize the stream once per chunk.
+        local_seq_lens_cpu = get_dcp_local_seq_lens(
+            compressed_seq_lens_cpu[start_idx:end_idx],
+            dcp_world_size,
+            None,
+            cp_kv_cache_interleave_size,
+        )
+        local_total_seq_lens = int(local_seq_lens_cpu[:, dcp_rank].sum())
+        max_local_total_seq_lens = int(local_seq_lens_cpu.sum(dim=0).max())
 
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]

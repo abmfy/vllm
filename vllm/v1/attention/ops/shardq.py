@@ -16,6 +16,7 @@ one Triton kernel, or fall back to NCCL when the TP group has no symmetric
 memory.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -105,6 +106,26 @@ class ShardQSplit(NamedTuple):
         return self.token_ids[start : start + self.num_tokens_per_rank[rank]]
 
 
+# Context tokens (summed over a step's requests) a DCP ShardQ step all-gathers.
+_DCP_GATHER_MAX_TOKENS = int(
+    os.environ.get("VLLM_DCP_SHARDQ_MAX_CONTEXT_TOKENS", str(1 << 20))
+)
+
+
+def dcp_shardq_enabled(vllm_config: "VllmConfig") -> bool:
+    """ShardQ under DCP (opt-in, VLLM_DCP_SHARDQ_PREFILL=1): a token-sharded
+    prefill step attends the all-gather of every rank's KV shard, and its
+    indexer scores against the all-gathered keys, instead of exchanging
+    every query and partial output across the DCP ranks."""
+    parallel_config = vllm_config.parallel_config
+    return (
+        os.environ.get("VLLM_DCP_SHARDQ_PREFILL", "0") == "1"
+        and parallel_config.decode_context_parallel_size
+        == parallel_config.tensor_parallel_size
+        and parallel_config.prefill_context_parallel_size == 1
+    )
+
+
 def build_shardq_split(
     common_attn_metadata: "CommonAttentionMetadata", vllm_config: "VllmConfig"
 ) -> ShardQSplit | None:
@@ -126,6 +147,12 @@ def build_shardq_split(
     assert seq_lens is not None
     topk_tokens = vllm_config.model_config.hf_text_config.index_topk
     if int(seq_lens[num_decodes:num_reqs].max()) <= topk_tokens:
+        return None
+    # Under DCP the step gathers its requests' whole contexts: prefill-only
+    # steps within the gather budget.
+    if vllm_config.parallel_config.decode_context_parallel_size > 1 and (
+        num_decodes > 0 or int(seq_lens[:num_reqs].sum()) > _DCP_GATHER_MAX_TOKENS
+    ):
         return None
     query_lens = common_attn_metadata.query_start_loc_cpu.diff()
     prefill_lens = query_lens[num_decodes:num_reqs].numpy()

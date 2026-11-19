@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from vllm import _custom_ops as ops
 from vllm.config import CUDAGraphMode, get_current_vllm_config
@@ -48,10 +49,17 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
+    split_decodes_and_prefills,
+)
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
+from vllm.v1.attention.ops.shardq import (
+    ShardQMetadata,
+    build_shardq_split,
+    dcp_shardq_enabled,
+)
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
@@ -145,6 +153,57 @@ class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
     host_staging_plan: HiSparsePrefillStagingPlan | None = None
 
 
+@dataclass(slots=True)
+class DCPGatherPlan:
+    """The context gather of a DCP ShardQ step. Every rank packs each request's
+    KV shard, padded to the request's largest shard, into `rank_stride` rows;
+    the all-gather of those is rank-major, so a request's token with local
+    index `i` on rank `r` sits at `r * rank_stride + starts[request] + i`."""
+
+    # [num_reqs] first row of each request within one rank's rows.
+    starts: torch.Tensor
+    rank_stride: int
+    # [rank_stride] request and local token of each packed row.
+    row_req: torch.Tensor
+    row_token: torch.Tensor
+
+
+def build_dcp_gather_plan(
+    seq_lens_cpu: torch.Tensor,
+    num_reqs: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    interleave: int,
+    block_size: int,
+    device: torch.device,
+) -> DCPGatherPlan:
+    seq_lens = seq_lens_cpu[:num_reqs]
+    # Rank 0 holds a request's largest shard.
+    shard_rows, local_rows = (
+        get_dcp_local_seq_lens(seq_lens, dcp_world_size, rank, interleave)
+        .numpy()
+        .astype(np.int64)
+        for rank in (0, dcp_rank)
+    )
+    starts = np.zeros(num_reqs + 1, dtype=np.int64)
+    np.cumsum(shard_rows, out=starts[1:])
+    total = int(starts[-1])
+    # Whole blocks, so the gathered rows view as a paged cache.
+    rank_stride = -(-total // block_size) * block_size
+    row_req = np.full(rank_stride, num_reqs - 1, dtype=np.int64)
+    row_req[:total] = np.repeat(np.arange(num_reqs), shard_rows)
+    row_token = np.zeros(rank_stride, dtype=np.int64)
+    row_token[:total] = np.arange(total) - starts[row_req[:total]]
+    # Rows past this rank's shard lie beyond every token's causal bound.
+    np.minimum(row_token, np.maximum(local_rows[row_req] - 1, 0), out=row_token)
+    return DCPGatherPlan(
+        starts=async_tensor_h2d(starts[:num_reqs].astype(np.int32), device=device),
+        rank_stride=rank_stride,
+        row_req=async_tensor_h2d(row_req, device=device),
+        row_token=async_tensor_h2d(row_token, device=device),
+    )
+
+
 @dataclass(kw_only=True)
 class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     block_table: torch.Tensor
@@ -161,6 +220,8 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     cp_kv_cache_interleave_size: int = 1
     # Set on token-sharded TP prefill steps (see vllm.v1.attention.ops.shardq).
     shardq: ShardQMetadata | None = None
+    # Set on a DCP ShardQ step's token-shard metadata: attend the gathered KV.
+    dcp_gather: DCPGatherPlan | None = None
     # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
 
@@ -188,6 +249,19 @@ def build_shardq_metadata(
             np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
         ),
     )
+    dcp_gather = None
+    dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+    if dcp_world_size > 1:
+        assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+        dcp_gather = build_dcp_gather_plan(
+            common_attn_metadata.seq_lens_cpu_upper_bound,
+            common_attn_metadata.num_reqs,
+            dcp_world_size,
+            get_dcp_group().rank_in_group,
+            metadata.cp_kv_cache_interleave_size,
+            metadata.block_size,
+            device,
+        )
     # The indexer wrote these tokens' top-k compactly after the decodes.
     shardq.attn_metadata = replace(
         metadata,
@@ -197,6 +271,7 @@ def build_shardq_metadata(
             shardq.local_token_ids + num_decode_tokens
         ],
         topk_start=num_decode_tokens,
+        dcp_gather=dcp_gather,
     )
     return shardq
 
@@ -683,6 +758,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa runs ShardQ metadata and is validated.
     supports_shardq: ClassVar[bool] = False
+    # Whether its ShardQ steps can attend the gathered KV under DCP.
+    supports_dcp_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -768,7 +845,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             and vllm_config.attention_config.sparse_mla_shard_q
             and vllm_config.attention_config.hisparse_config is None
             and parallel_config.tensor_parallel_size > 1
-            and parallel_config.decode_context_parallel_size == 1
+            and (
+                parallel_config.decode_context_parallel_size == 1
+                or (self.supports_dcp_shardq and dcp_shardq_enabled(vllm_config))
+            )
             and parallel_config.prefill_context_parallel_size == 1
             and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
         )
@@ -814,6 +894,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         num_decode_tokens = attn_metadata.num_decode_tokens
         block_size = attn_metadata.block_size
         index_group = self.index_group
+        if attn_metadata.dcp_gather is not None:
+            return self._forward_mqa_dcp_gathered(
+                q, kv_c_and_k_pe_cache, topk, attn_metadata, layer
+            )
         if not isinstance(index_group, HiSparseMLAIndexGroup):
             _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
             if self.dcp_world_size > 1:
@@ -947,6 +1031,59 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             return out, None
         assert prefill_lse is not None
         return out, torch.cat((decode_lse, prefill_lse))
+
+    def _forward_mqa_dcp_gathered(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """A DCP ShardQ step: this rank's tokens attend, with every head, the
+        all-gather of the DCP ranks' KV shards of the step's requests."""
+        plan = attn_metadata.dcp_gather
+        assert plan is not None
+        block_size = attn_metadata.block_size
+        rows, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
+        blocks = attn_metadata.block_table[plan.row_req, plan.row_token // block_size]
+        # Move bytes: NCCL may lack the cache dtype (e.g. fp8).
+        shard = rows.view(torch.uint8).index_select(
+            0, blocks.long() * block_stride_rows + plan.row_token % block_size
+        )
+        gathered = shard.new_empty(
+            (self.dcp_world_size * plan.rank_stride, shard.shape[1])
+        )
+        dist.all_gather_into_tensor(
+            gathered, shard, group=get_dcp_group().device_group
+        )
+        gathered = gathered.view(rows.dtype)
+        req_id_per_token = attn_metadata.req_id_per_token[: topk.shape[0]]
+        physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+            req_id_per_token,
+            attn_metadata.block_table,
+            topk,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            NUM_TOPK_TOKENS=topk.shape[1],
+            HAS_PREFILL_WORKSPACE=True,
+            prefill_workspace_request_ids=req_id_per_token,
+            prefill_workspace_starts=plan.starts,
+            prefill_workspace_rank_stride=plan.rank_stride,
+            dcp_size=self.dcp_world_size,
+            dcp_rank=self.dcp_rank,
+            cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
+            return_valid_counts=True,
+        )
+        return self._forward_mqa_kernel(
+            q,
+            gathered.view(-1, block_size, gathered.shape[1]),
+            physical_topk,
+            valid_counts,
+            layer=layer,
+            block_size=block_size,
+            is_decode=False,
+        )
 
     def _forward_mqa_kernel(
         self,

@@ -824,11 +824,24 @@ def sparse_attn_indexer(
                 gather_specs.extend(
                     _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
                 )
-        k_quant_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
-            values_spec,
-            scales_spec,
-            *gather_specs,
-        )
+        if gather_specs and not use_pcp:
+            # A DCP ShardQ step: its gathers are not part of the profiled
+            # workspace.
+            k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
+                values_spec, scales_spec
+            )
+            gather_bufs = [
+                torch.empty(shape, dtype=dtype, device=hidden_states.device)
+                for shape, dtype in gather_specs
+            ]
+        else:
+            k_quant_full, k_scale_full, *gather_bufs = (
+                workspace_manager.get_simultaneous(
+                    values_spec,
+                    scales_spec,
+                    *gather_specs,
+                )
+            )
         # Under ShardQ the chunks index the shardq_gather_indices tokens. The
         # caller may have computed the query and weights of just those.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
@@ -838,6 +851,7 @@ def sparse_attn_indexer(
             prefill_q, prefill_weights = q_quant[indices], weights[indices]
             if q_scale is not None:
                 prefill_q_scale = q_scale[indices]
+        gathered_k: tuple[torch.Tensor, torch.Tensor] | None = None
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -857,7 +871,13 @@ def sparse_attn_indexer(
 
             # PCP + DCP KV all-gather.
             deinterleave_idx = chunk.pcp_deinterleave_idx
-            if deinterleave_idx is not None:
+            if deinterleave_idx is not None and (
+                chunk.skip_kv_gather and not use_pcp and gathered_k is not None
+            ):
+                # A later query slice of the same requests (the same on every
+                # rank of a DCP ShardQ step): the gathered keys are in place.
+                k_quant, k_scale = gathered_k
+            elif deinterleave_idx is not None:
                 # local_total_seq_lens is the PCP-padded extent here, so every
                 # rank contributes an identically shaped shard.
                 gathered_values, gathered_scales, out_values, out_scales = gather_bufs
@@ -871,6 +891,7 @@ def sparse_attn_indexer(
                     gathered_scales,
                     out_scales,
                 )
+                gathered_k = (k_quant, k_scale)
 
             q_slice = prefill_q[row_start:row_end]
             q_scale_slice = (
