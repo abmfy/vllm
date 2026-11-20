@@ -845,10 +845,9 @@ class KVCacheManager:
                 continue
             assert num_computed_tokens % manager.block_size == 0
             num_blocks = num_computed_tokens // manager.block_size
-            if issubclass(group.manager_cls, MambaManager):
-                num_blocks = min(num_blocks, len(group_blocks))
-            else:
-                assert num_blocks <= len(group_blocks)
+            # A Mamba group, and a sliding-window drafter group that backs only
+            # its tail, may end before this endpoint.
+            num_blocks = min(num_blocks, len(group_blocks))
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
